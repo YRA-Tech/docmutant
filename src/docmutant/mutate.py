@@ -129,48 +129,75 @@ def content_streams(pdf: pikepdf.Pdf) -> list[StreamRef]:
     return refs
 
 
-def _keep_only(obj: pikepdf.Object, allowed: frozenset[str]) -> int:
-    removed = [key for key in obj if key not in allowed]
-    for key in removed:
-        del obj[key]
-    return len(removed)
+_PLACEHOLDER_NAME = re.compile(r"Layer \d+")
+
+
+def _is_name(value: object) -> bool:
+    return isinstance(value, pikepdf.Name)
+
+
+def _visibility_expression(value: object) -> bool:
+    if _is_name(value) or isinstance(value, pikepdf.Dictionary):
+        return True
+    return isinstance(value, pikepdf.Array) and all(_visibility_expression(v) for v in value)
+
+
+def _structural(key: str, value: object) -> bool:
+    """True when ``value`` has the type that the structural ``key`` requires.
+
+    An allowed key with a value of another type (for example ``/MCID (text)``)
+    could carry source text, so it is dropped like an unknown key.
+    """
+    if key == "/MCID":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if key in ("/Type", "/P"):
+        return _is_name(value)
+    if key == "/Intent":
+        return _is_name(value) or (
+            isinstance(value, pikepdf.Array) and all(_is_name(v) for v in value)
+        )
+    if key == "/OCGs":
+        return isinstance(value, pikepdf.Dictionary) or (
+            isinstance(value, pikepdf.Array)
+            and all(isinstance(v, pikepdf.Dictionary) for v in value)
+        )
+    if key == "/VE":
+        return _visibility_expression(value)
+    return False
+
+
+def _direct_dictionaries(obj: pikepdf.Object) -> Iterator[pikepdf.Object]:
+    """``obj`` and every dictionary nested in it directly (indirect references not followed)."""
+    stack = [obj]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, (pikepdf.Dictionary, pikepdf.Stream)):
+            yield current
+            children = [current[key] for key in current]
+        elif isinstance(current, pikepdf.Array):
+            children = list(current)
+        else:
+            continue
+        stack.extend(
+            child
+            for child in children
+            if isinstance(child, (pikepdf.Dictionary, pikepdf.Array)) and child.objgen == (0, 0)
+        )
 
 
 def strip_marked_content_text(pdf: pikepdf.Pdf) -> int:
-    """Reduce marked-content and optional-content properties to structural keys.
+    """Reduce marked-content and optional-content properties to structural keys and values.
 
-    Covers inline BDC/DP property lists in every content stream, every
-    /Properties resource entry, and every OCG and OCMD dictionary in the file.
-    OCG names, which the specification requires, become neutral placeholders.
+    Covers inline BDC/DP property lists in every content stream, and every
+    /Properties entry and OCG/OCMD dictionary anywhere in the file, direct
+    dictionaries included. OCG names, which the specification requires, become
+    neutral placeholders.
     """
-    count = 0
-    for ref in content_streams(pdf):
-        rewritten: list[Instruction] = []
-        changed = False
-        for instruction in read_stream(pdf, ref):
-            if (
-                isinstance(instruction, pikepdf.ContentStreamInstruction)
-                and str(instruction.operator) in ("BDC", "DP")
-                and len(instruction.operands) == 2
-                and isinstance(instruction.operands[1], pikepdf.Dictionary)
-            ):
-                props = instruction.operands[1]
-                kept = {k: props[k] for k in props if k in PROPERTY_KEEP}
-                if len(kept) != len(props.keys()):
-                    count += len(props.keys()) - len(kept)
-                    changed = True
-                    instruction = pikepdf.ContentStreamInstruction(
-                        [instruction.operands[0], pikepdf.Dictionary(kept)], instruction.operator
-                    )
-            rewritten.append(instruction)
-        if changed:
-            write_stream(pdf, ref, rewritten)
-
     layers = [0]
     cleaned: set[tuple[int, int]] = set()
 
-    def clean(entry: pikepdf.Object) -> int:
-        """Clean one property, OCG or OCMD dictionary, direct or indirect.
+    def clean(entry: object) -> int:
+        """Clean one property, OCG or OCMD dictionary and the dictionaries it holds.
 
         Indirect objects are cleaned once. Direct ones are cleaned wherever they
         are met; cleaning is idempotent, and Python object ids are not stable
@@ -183,32 +210,58 @@ def strip_marked_content_text(pdf: pikepdf.Pdf) -> int:
                 return 0
             cleaned.add(entry.objgen)
         kind = entry.get("/Type")
-        if kind == "/OCG":
-            removed = _keep_only(entry, OCG_KEEP)
+        allowed = {"/OCG": OCG_KEEP, "/OCMD": OCMD_KEEP}.get(str(kind), PROPERTY_KEEP)
+        removed = [
+            key
+            for key in entry
+            if key not in allowed or (key != "/Name" and not _structural(key, entry[key]))
+        ]
+        for key in removed:
+            del entry[key]
+        count = len(removed)
+        if kind == "/OCG" and not _PLACEHOLDER_NAME.fullmatch(str(entry.get("/Name", ""))):
             layers[0] += 1
             entry.Name = pikepdf.String(f"Layer {layers[0]}")
-            return removed
-        if kind == "/OCMD":
-            removed = _keep_only(entry, OCMD_KEEP)
-            ocgs = entry.get("/OCGs")
-            members = ocgs if isinstance(ocgs, pikepdf.Array) else [ocgs]
-            return removed + sum(clean(member) for member in members if member is not None)
-        return _keep_only(entry, PROPERTY_KEEP)
+        for key in ("/OCGs", "/VE"):
+            if key in entry:
+                count += sum(clean(d) for d in _direct_dictionaries(entry[key]) if d is not entry)
+                if isinstance(entry[key], pikepdf.Dictionary):
+                    count += clean(entry[key])
+        return count
 
-    for obj in pdf.objects:
+    count = 0
+    for ref in content_streams(pdf):
+        rewritten: list[Instruction] = []
+        changed = False
+        for instruction in read_stream(pdf, ref):
+            if (
+                isinstance(instruction, pikepdf.ContentStreamInstruction)
+                and str(instruction.operator) in ("BDC", "DP")
+                and len(instruction.operands) == 2
+                and isinstance(instruction.operands[1], pikepdf.Dictionary)
+            ):
+                props = pikepdf.Dictionary({k: v for k, v in instruction.operands[1].items()})
+                removed = clean(props)
+                if removed:
+                    count += removed
+                    changed = True
+                    instruction = pikepdf.ContentStreamInstruction(
+                        [instruction.operands[0], props], instruction.operator
+                    )
+            rewritten.append(instruction)
+        if changed:
+            write_stream(pdf, ref, rewritten)
+
+    for obj in list(pdf.objects):
         if not isinstance(obj, (pikepdf.Dictionary, pikepdf.Stream)):
             continue
-        if obj.get("/Type") in ("/OCG", "/OCMD"):
-            count += clean(obj)
-        properties = obj.get("/Properties")
-        if isinstance(properties, pikepdf.Dictionary):
-            for _, entry in properties.items():
-                count += clean(entry)
-    for page in pdf.pages:
-        properties = page.obj.get("/Resources", pikepdf.Dictionary()).get("/Properties")
-        if isinstance(properties, pikepdf.Dictionary):
-            for _, entry in properties.items():
-                count += clean(entry)
+        for dictionary in _direct_dictionaries(obj):
+            if dictionary.get("/Type") in ("/OCG", "/OCMD"):
+                count += clean(dictionary)
+            properties = dictionary.get("/Properties")
+            if isinstance(properties, pikepdf.Dictionary):
+                for _, entry in properties.items():
+                    count += clean(entry)
     return count
 
 

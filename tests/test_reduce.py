@@ -243,3 +243,39 @@ def test_marked_content_in_patterns_and_type3_glyphs_is_cleaned() -> None:
         for instruction in pikepdf.parse_content_stream(stream):
             if str(instruction.operator) == "BDC":
                 assert set(instruction.operands[1].keys()) == {"/MCID"}
+
+
+def test_properties_in_direct_resources_and_wrong_value_types_are_cleaned() -> None:
+    pdf = pikepdf.Pdf.new()
+    form = pdf.make_stream(
+        f"/Span <</MCID ({SECRET}) /P /Art>> BDC 0 0 1 1 re f EMC".encode(),
+        Type=pikepdf.Name.XObject,
+        Subtype=pikepdf.Name.Form,
+        BBox=[0, 0, 4, 4],
+        # A direct /Resources dictionary: not an object of its own in the file.
+        Resources=pikepdf.Dictionary(
+            Properties=pikepdf.Dictionary(
+                MC0=pikepdf.Dictionary(Alt=pikepdf.String(SECRET), MCID=3),
+                OC0=pikepdf.Dictionary(
+                    Type=pikepdf.Name.OCMD,
+                    OCGs=pikepdf.Dictionary(
+                        Type=pikepdf.Name.OCG,
+                        Name=pikepdf.String(SECRET),
+                        Usage=pikepdf.Dictionary(Creator=pikepdf.String(SECRET)),
+                    ),
+                ),
+            )
+        ),
+    )
+    pdf.add_blank_page()
+    pdf.pages[0].Resources = pikepdf.Dictionary(XObject=pikepdf.Dictionary(Fm0=form))
+
+    strip_marked_content_text(pdf)
+
+    properties = form.Resources.Properties
+    assert set(properties.MC0.keys()) == {"/MCID"}
+    ocg = properties.OC0.OCGs
+    assert set(ocg.keys()) <= OCG_KEEP and str(ocg.Name) == "Layer 1"
+    for instruction in pikepdf.parse_content_stream(form):
+        if str(instruction.operator) == "BDC":
+            assert dict(instruction.operands[1].items()) == {"/P": pikepdf.Name.Art}
