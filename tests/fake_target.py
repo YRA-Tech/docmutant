@@ -5,6 +5,8 @@ FEATURE is one of:
   coordinate  - a content operand equal to 123.456 (a path trigger)
   text        - any text object
   image       - any image XObject drawn by the page
+  marked      - any marked-content sequence (BDC)
+  form        - any form XObject drawn by the page
 """
 
 import os
@@ -36,6 +38,12 @@ def main() -> None:
                 os.abort()
             if feature == "text" and op == "BT":
                 os.abort()
+            if feature == "marked" and op == "BDC":
+                os.abort()
+            if feature == "form" and op == "Do":
+                xobject = page.obj.Resources.XObject[instruction.operands[0]]
+                if xobject.get("/Subtype") == "/Form":
+                    os.abort()
             if feature == "image" and op == "Do":
                 xobject = page.obj.Resources.XObject[instruction.operands[0]]
                 if xobject.get("/Subtype") == "/Image":

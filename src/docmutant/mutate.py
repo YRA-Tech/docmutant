@@ -87,6 +87,73 @@ def strip_page_extras(pdf: pikepdf.Pdf) -> list[str]:
     return removed
 
 
+# Keys that carry text of their own in marked-content properties and structure:
+# replacement text, alternate descriptions, expansions, language, titles.
+TEXT_PROPERTY_KEYS = ("/ActualText", "/Alt", "/E", "/Lang", "/T", "/TU")
+FORM_KEEP = frozenset(
+    {
+        "/Type",
+        "/Subtype",
+        "/FormType",
+        "/BBox",
+        "/Matrix",
+        "/Resources",
+        "/Group",
+        "/Length",
+        "/Filter",
+        "/DecodeParms",
+    }
+)
+
+
+def strip_marked_content_text(pdf: pikepdf.Pdf, refs: list[StreamRef]) -> int:
+    """Remove text-bearing keys from BDC/DP property lists and /Properties resources."""
+    count = 0
+    for ref in refs:
+        rewritten: list[Instruction] = []
+        changed = False
+        for instruction in read_stream(pdf, ref):
+            if (
+                isinstance(instruction, pikepdf.ContentStreamInstruction)
+                and str(instruction.operator) in ("BDC", "DP")
+                and len(instruction.operands) == 2
+                and isinstance(instruction.operands[1], pikepdf.Dictionary)
+            ):
+                props = instruction.operands[1]
+                kept = {k: props[k] for k in props if k not in TEXT_PROPERTY_KEYS}
+                if len(kept) != len(props.keys()):
+                    count += len(props.keys()) - len(kept)
+                    changed = True
+                    instruction = pikepdf.ContentStreamInstruction(
+                        [instruction.operands[0], pikepdf.Dictionary(kept)], instruction.operator
+                    )
+            rewritten.append(instruction)
+        if changed:
+            write_stream(pdf, ref, rewritten)
+        resources = stream_resources(pdf, ref)
+        properties = resources.get("/Properties") if resources is not None else None
+        if properties is not None:
+            for _, entry in properties.items():
+                if isinstance(entry, pikepdf.Dictionary):
+                    for key in TEXT_PROPERTY_KEYS:
+                        if key in entry:
+                            del entry[key]
+                            count += 1
+    return count
+
+
+def strip_form_extras(pdf: pikepdf.Pdf) -> list[str]:
+    """Drop every form XObject key that rendering does not need."""
+    removed: list[str] = []
+    for ref in form_xobjects(pdf):
+        assert ref.objgen is not None
+        form = pdf.get_object(ref.objgen)
+        for key in [k for k in form if k not in FORM_KEEP]:
+            del form[key]
+            removed.append(str(key))
+    return removed
+
+
 def strip_metadata_streams(pdf: pikepdf.Pdf) -> int:
     """Remove /Metadata and /PieceInfo from every dictionary and stream."""
     count = 0

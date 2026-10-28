@@ -12,7 +12,14 @@ import pytest
 
 from docmutant.cli import _portable_command
 from docmutant.content import ddmin, flatten, parse_units
-from docmutant.mutate import IMAGE_KEEP, PAGE_KEEP, font_codes, image_hashes
+from docmutant.mutate import (
+    FORM_KEEP,
+    IMAGE_KEEP,
+    PAGE_KEEP,
+    TEXT_PROPERTY_KEYS,
+    font_codes,
+    image_hashes,
+)
 from docmutant.oracles import CommandOracle, OracleKind
 from docmutant.reduce import OracleDidNotFire, Reducer
 
@@ -54,12 +61,22 @@ def _source_pdf() -> bytes:
         Name=pikepdf.Name.X,
         PrivateNote=pikepdf.String(SECRET),
     )
+    form = pdf.make_stream(
+        b"0 0 5 5 re f",
+        Type=pikepdf.Name.XObject,
+        Subtype=pikepdf.Name.Form,
+        BBox=[0, 0, 10, 10],
+        PrivateData=pikepdf.String(SECRET),
+    )
     content = (
         f"q 1 0 0 1 10 10 cm 0 0 50 50 re f Q\n"
         f"BT /F1 12 Tf 72 700 Td ({SECRET}) Tj ET\n"
         f"q 100 0 0 100 300 300 cm /Im1 Do Q\n"
         f"q 0.5 w 10 10 m 123.456 50 l S Q\n"
         f"q 200 200 m 250 250 l 300 200 l f Q\n"
+        f"/Span <</ActualText ({SECRET})>> BDC 5 5 m 6 6 l S EMC\n"
+        f"/OC /P1 BDC 7 7 m 8 8 l S EMC\n"
+        f"q /Fm1 Do Q\n"
     ).encode()
     for index in range(3):
         body = content if index == 1 else b"q 0 0 10 10 re f Q"
@@ -68,7 +85,11 @@ def _source_pdf() -> bytes:
                 Type=pikepdf.Name.Page,
                 MediaBox=[0, 0, 612, 792],
                 Resources=pikepdf.Dictionary(
-                    Font=pikepdf.Dictionary(F1=font), XObject=pikepdf.Dictionary(Im1=image)
+                    Font=pikepdf.Dictionary(F1=font),
+                    XObject=pikepdf.Dictionary(Im1=image, Fm1=form),
+                    Properties=pikepdf.Dictionary(
+                        P1=pikepdf.Dictionary(Type=pikepdf.Name.OCG, Alt=pikepdf.String(SECRET))
+                    ),
                 ),
                 Contents=pdf.make_stream(body),
                 CAPT_Info=pikepdf.Dictionary(SK=pikepdf.String(r"c:\scans\secret_0002.pdf")),
@@ -162,3 +183,28 @@ def test_recorded_command_has_no_local_paths(tmp_path: Path) -> None:
         ["/home/user/.venv/bin/docmutant", "reduce", str(pdf), "--target-python", "/opt/x/python"]
     )
     assert command == "docmutant reduce manual.pdf --target-python python"
+
+
+def test_needed_marked_content_loses_its_text() -> None:
+    result = Reducer(_oracle("marked"), log=lambda _: None).run(_source_pdf(), page=2)
+    with pikepdf.open(io.BytesIO(result.data)) as pdf:
+        page = pdf.pages[0]
+        for instruction in pikepdf.parse_content_stream(page):
+            if str(instruction.operator) == "BDC" and isinstance(
+                instruction.operands[1], pikepdf.Dictionary
+            ):
+                assert not set(instruction.operands[1].keys()) & set(TEXT_PROPERTY_KEYS)
+        for _, entry in page.Resources.get("/Properties", {}).items():
+            assert not set(entry.keys()) & set(TEXT_PROPERTY_KEYS)
+
+
+def test_needed_form_keeps_only_rendering_keys() -> None:
+    result = Reducer(_oracle("form"), log=lambda _: None).run(_source_pdf(), page=2)
+    with pikepdf.open(io.BytesIO(result.data)) as pdf:
+        form = pdf.pages[0].Resources.XObject.Fm1
+        assert set(form.keys()) <= FORM_KEEP
+
+
+def test_recorded_command_cleans_option_values(tmp_path: Path) -> None:
+    command = _portable_command(["docmutant", "reduce", "--out=/home/user/secret/p7.pdf"])
+    assert command == "docmutant reduce --out=p7.pdf"

@@ -28,6 +28,8 @@ from docmutant.mutate import (
     remove_font_programs,
     replace_image,
     strip_catalog,
+    strip_form_extras,
+    strip_marked_content_text,
     strip_metadata_streams,
     strip_page_extras,
     swap_text_codes,
@@ -127,9 +129,17 @@ class Reducer:
         for ref in forms:
             self._reduce_stream(result, ref)
 
-        # 4. Replace what remains: text codes, image samples, font programs.
+        # 4. Replace what remains: text-bearing properties, text codes, image
+        #    samples, font programs.
         def all_streams(pdf: pikepdf.Pdf) -> list[StreamRef]:
             return [StreamRef("page", 0), *form_xobjects(pdf)]
+
+        step("strip-form-extras", {}, strip_form_extras)
+        step(
+            "strip-marked-content-text",
+            {"keys": ["/ActualText", "/Alt", "/E", "/Lang", "/T", "/TU"]},
+            lambda pdf: strip_marked_content_text(pdf, all_streams(pdf)),
+        )
 
         step(
             "swap-text-codes",

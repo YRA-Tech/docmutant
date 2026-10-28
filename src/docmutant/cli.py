@@ -167,8 +167,11 @@ def _portable_command(argv: list[str]) -> str:
     """
     parts = ["docmutant"]
     for arg in argv[1:]:
-        path = Path(arg)
-        parts.append(path.name if path.is_absolute() or path.exists() else arg)
+        option, equals, value = arg.partition("=") if arg.startswith("--") else ("", "", arg)
+        path = Path(value)
+        if value and (path.is_absolute() or path.exists()):
+            value = path.name
+        parts.append(f"{option}{equals}{value}" if equals else value if not option else arg)
     return shlex.join(parts)
 
 

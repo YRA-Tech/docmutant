@@ -122,4 +122,5 @@ def _docling_parse_label(python: Path) -> str:
         timeout=60,
         check=True,
     )
-    return f"docling-parse {completed.stdout.strip()} ({python})"
+    # No interpreter path: the label goes into published manifests.
+    return f"docling-parse {completed.stdout.strip()}"
