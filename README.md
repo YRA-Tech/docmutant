@@ -35,12 +35,18 @@ the labels stay exact.
 
 ## Status
 
-Pre-alpha. This first release contains the manifest model, its policy checks
-and a validator. The reduce/sanitize mode for rendering bugs comes next.
+Pre-alpha. Built so far: the manifest model with its policy checks, a
+validator, and a first reduce/sanitize mode for rendering bugs with crash,
+hang and error oracles that run docling-parse. See
+[docs/DESIGN.md](docs/DESIGN.md) for the design and the roadmap.
 
 ```console
+$ docmutant reduce manual.pdf --page 7 --out p7.pdf --oracle crash \
+    --target-python /path/to/buggy/.venv/bin/python \
+    --silent-python /path/to/fixed/.venv/bin/python --scale 3.0
+$ docmutant attest p7.pdf.docmutant.json --reviewer "A. Reviewer"
+$ docmutant validate --check-file p7.pdf.docmutant.json
 $ docmutant schema                     # print the manifest JSON Schema
-$ docmutant validate --check-file x.pdf.docmutant.json
 ```
 
 ## Manifest
