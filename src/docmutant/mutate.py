@@ -87,9 +87,12 @@ def strip_page_extras(pdf: pikepdf.Pdf) -> list[str]:
     return removed
 
 
-# Keys that carry text of their own in marked-content properties and structure:
-# replacement text, alternate descriptions, expansions, language, titles.
-TEXT_PROPERTY_KEYS = ("/ActualText", "/Alt", "/E", "/Lang", "/T", "/TU")
+# Marked-content property lists and optional-content dictionaries keep only
+# structural keys. Everything else, for example /ActualText, /Alt, /E, /Lang,
+# /T or private producer keys, can carry source text.
+PROPERTY_KEEP = frozenset({"/Type", "/MCID", "/OCGs", "/P", "/VE", "/Intent"})
+OCG_KEEP = frozenset({"/Type", "/Name", "/Intent"})
+OCMD_KEEP = frozenset({"/Type", "/OCGs", "/P", "/VE"})
 FORM_KEEP = frozenset(
     {
         "/Type",
@@ -106,10 +109,42 @@ FORM_KEEP = frozenset(
 )
 
 
-def strip_marked_content_text(pdf: pikepdf.Pdf, refs: list[StreamRef]) -> int:
-    """Remove text-bearing keys from BDC/DP property lists and /Properties resources."""
+def content_streams(pdf: pikepdf.Pdf) -> list[StreamRef]:
+    """Every content stream: pages, form XObjects, tiling patterns, Type3 glyph procedures."""
+    refs = [StreamRef("page", index) for index in range(len(pdf.pages))]
+    seen: set[tuple[int, int]] = set()
+    for obj in pdf.objects:
+        if isinstance(obj, pikepdf.Stream) and (
+            obj.get("/Subtype") == "/Form" or obj.get("/PatternType") == 1
+        ):
+            kind = "form" if obj.get("/Subtype") == "/Form" else "pattern"
+            if obj.objgen not in seen:
+                seen.add(obj.objgen)
+                refs.append(StreamRef(kind, 0, obj.objgen))
+        elif isinstance(obj, pikepdf.Dictionary) and obj.get("/Subtype") == "/Type3":
+            for _, proc in obj.get("/CharProcs", pikepdf.Dictionary()).items():
+                if isinstance(proc, pikepdf.Stream) and proc.objgen not in seen:
+                    seen.add(proc.objgen)
+                    refs.append(StreamRef("charproc", 0, proc.objgen))
+    return refs
+
+
+def _keep_only(obj: pikepdf.Object, allowed: frozenset[str]) -> int:
+    removed = [key for key in obj if key not in allowed]
+    for key in removed:
+        del obj[key]
+    return len(removed)
+
+
+def strip_marked_content_text(pdf: pikepdf.Pdf) -> int:
+    """Reduce marked-content and optional-content properties to structural keys.
+
+    Covers inline BDC/DP property lists in every content stream, every
+    /Properties resource entry, and every OCG and OCMD dictionary in the file.
+    OCG names, which the specification requires, become neutral placeholders.
+    """
     count = 0
-    for ref in refs:
+    for ref in content_streams(pdf):
         rewritten: list[Instruction] = []
         changed = False
         for instruction in read_stream(pdf, ref):
@@ -120,7 +155,7 @@ def strip_marked_content_text(pdf: pikepdf.Pdf, refs: list[StreamRef]) -> int:
                 and isinstance(instruction.operands[1], pikepdf.Dictionary)
             ):
                 props = instruction.operands[1]
-                kept = {k: props[k] for k in props if k not in TEXT_PROPERTY_KEYS}
+                kept = {k: props[k] for k in props if k in PROPERTY_KEEP}
                 if len(kept) != len(props.keys()):
                     count += len(props.keys()) - len(kept)
                     changed = True
@@ -130,15 +165,50 @@ def strip_marked_content_text(pdf: pikepdf.Pdf, refs: list[StreamRef]) -> int:
             rewritten.append(instruction)
         if changed:
             write_stream(pdf, ref, rewritten)
-        resources = stream_resources(pdf, ref)
-        properties = resources.get("/Properties") if resources is not None else None
-        if properties is not None:
+
+    layers = [0]
+    cleaned: set[tuple[int, int]] = set()
+
+    def clean(entry: pikepdf.Object) -> int:
+        """Clean one property, OCG or OCMD dictionary, direct or indirect.
+
+        Indirect objects are cleaned once. Direct ones are cleaned wherever they
+        are met; cleaning is idempotent, and Python object ids are not stable
+        enough to deduplicate them safely.
+        """
+        if not isinstance(entry, (pikepdf.Dictionary, pikepdf.Stream)):
+            return 0
+        if entry.objgen != (0, 0):
+            if entry.objgen in cleaned:
+                return 0
+            cleaned.add(entry.objgen)
+        kind = entry.get("/Type")
+        if kind == "/OCG":
+            removed = _keep_only(entry, OCG_KEEP)
+            layers[0] += 1
+            entry.Name = pikepdf.String(f"Layer {layers[0]}")
+            return removed
+        if kind == "/OCMD":
+            removed = _keep_only(entry, OCMD_KEEP)
+            ocgs = entry.get("/OCGs")
+            members = ocgs if isinstance(ocgs, pikepdf.Array) else [ocgs]
+            return removed + sum(clean(member) for member in members if member is not None)
+        return _keep_only(entry, PROPERTY_KEEP)
+
+    for obj in pdf.objects:
+        if not isinstance(obj, (pikepdf.Dictionary, pikepdf.Stream)):
+            continue
+        if obj.get("/Type") in ("/OCG", "/OCMD"):
+            count += clean(obj)
+        properties = obj.get("/Properties")
+        if isinstance(properties, pikepdf.Dictionary):
             for _, entry in properties.items():
-                if isinstance(entry, pikepdf.Dictionary):
-                    for key in TEXT_PROPERTY_KEYS:
-                        if key in entry:
-                            del entry[key]
-                            count += 1
+                count += clean(entry)
+    for page in pdf.pages:
+        properties = page.obj.get("/Resources", pikepdf.Dictionary()).get("/Properties")
+        if isinstance(properties, pikepdf.Dictionary):
+            for _, entry in properties.items():
+                count += clean(entry)
     return count
 
 
@@ -173,14 +243,14 @@ def strip_metadata_streams(pdf: pikepdf.Pdf) -> int:
 class StreamRef:
     """A content stream to work on: a page's contents or a form XObject."""
 
-    kind: str  # "page" or "form"
+    kind: str  # "page", "form", "pattern" or "charproc"
     page_index: int
     objgen: tuple[int, int] | None = None
 
     def label(self) -> str:
         if self.kind == "page":
             return f"page {self.page_index + 1}"
-        return f"form {self.objgen[0]} {self.objgen[1]}" if self.objgen else "form"
+        return f"{self.kind} {self.objgen[0]} {self.objgen[1]}" if self.objgen else self.kind
 
 
 def read_stream(pdf: pikepdf.Pdf, ref: StreamRef) -> list[Instruction]:

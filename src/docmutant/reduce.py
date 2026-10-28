@@ -20,6 +20,7 @@ import pikepdf
 
 from docmutant.content import Unit, flatten, parse_units, reduce_units
 from docmutant.mutate import (
+    PROPERTY_KEEP,
     StreamRef,
     form_xobjects,
     image_xobjects,
@@ -137,8 +138,8 @@ class Reducer:
         step("strip-form-extras", {}, strip_form_extras)
         step(
             "strip-marked-content-text",
-            {"keys": ["/ActualText", "/Alt", "/E", "/Lang", "/T", "/TU"]},
-            lambda pdf: strip_marked_content_text(pdf, all_streams(pdf)),
+            {"keep": sorted(PROPERTY_KEEP), "ocg_names": "Layer N"},
+            strip_marked_content_text,
         )
 
         step(

@@ -15,10 +15,12 @@ from docmutant.content import ddmin, flatten, parse_units
 from docmutant.mutate import (
     FORM_KEEP,
     IMAGE_KEEP,
+    OCG_KEEP,
     PAGE_KEEP,
-    TEXT_PROPERTY_KEYS,
+    PROPERTY_KEEP,
     font_codes,
     image_hashes,
+    strip_marked_content_text,
 )
 from docmutant.oracles import CommandOracle, OracleKind
 from docmutant.reduce import OracleDidNotFire, Reducer
@@ -88,7 +90,14 @@ def _source_pdf() -> bytes:
                     Font=pikepdf.Dictionary(F1=font),
                     XObject=pikepdf.Dictionary(Im1=image, Fm1=form),
                     Properties=pikepdf.Dictionary(
-                        P1=pikepdf.Dictionary(Type=pikepdf.Name.OCG, Alt=pikepdf.String(SECRET))
+                        P1=pikepdf.Dictionary(
+                            Type=pikepdf.Name.OCG,
+                            Name=pikepdf.String(SECRET),
+                            Alt=pikepdf.String(SECRET),
+                            Usage=pikepdf.Dictionary(
+                                CreatorInfo=pikepdf.Dictionary(Creator=pikepdf.String(SECRET))
+                            ),
+                        )
                     ),
                 ),
                 Contents=pdf.make_stream(body),
@@ -193,9 +202,10 @@ def test_needed_marked_content_loses_its_text() -> None:
             if str(instruction.operator) == "BDC" and isinstance(
                 instruction.operands[1], pikepdf.Dictionary
             ):
-                assert not set(instruction.operands[1].keys()) & set(TEXT_PROPERTY_KEYS)
+                assert set(instruction.operands[1].keys()) <= PROPERTY_KEEP
         for _, entry in page.Resources.get("/Properties", {}).items():
-            assert not set(entry.keys()) & set(TEXT_PROPERTY_KEYS)
+            assert set(entry.keys()) <= OCG_KEEP
+            assert str(entry.Name) != SECRET
 
 
 def test_needed_form_keeps_only_rendering_keys() -> None:
@@ -208,3 +218,28 @@ def test_needed_form_keeps_only_rendering_keys() -> None:
 def test_recorded_command_cleans_option_values(tmp_path: Path) -> None:
     command = _portable_command(["docmutant", "reduce", "--out=/home/user/secret/p7.pdf"])
     assert command == "docmutant reduce --out=p7.pdf"
+
+
+def test_marked_content_in_patterns_and_type3_glyphs_is_cleaned() -> None:
+    pdf = pikepdf.Pdf.new()
+    marked = f"/Span <</ActualText ({SECRET}) /MCID 0>> BDC 0 0 1 1 re f EMC".encode()
+    pattern = pdf.make_stream(
+        marked, PatternType=1, PaintType=1, TilingType=1, BBox=[0, 0, 4, 4], XStep=4, YStep=4
+    )
+    glyph = pdf.make_stream(b"0 0 d0 " + marked)
+    type3 = pdf.make_indirect(
+        pikepdf.Dictionary(
+            Type=pikepdf.Name.Font, Subtype=pikepdf.Name.Type3, CharProcs={"/a": glyph}
+        )
+    )
+    pdf.add_blank_page()
+    pdf.pages[0].Resources = pikepdf.Dictionary(
+        Pattern=pikepdf.Dictionary(P0=pattern), Font=pikepdf.Dictionary(T3=type3)
+    )
+
+    strip_marked_content_text(pdf)
+
+    for stream in (pattern, glyph):
+        for instruction in pikepdf.parse_content_stream(stream):
+            if str(instruction.operator) == "BDC":
+                assert set(instruction.operands[1].keys()) == {"/MCID"}
