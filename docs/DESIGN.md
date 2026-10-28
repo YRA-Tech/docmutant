@@ -14,6 +14,10 @@ change with an *oracle*. It serves three uses that need the same machinery:
 | **Training and evaluation data** for document AI | Content is plausible; labels (word boxes, item types) stay exact | The source license is respected; labels are preserved |
 | **Privacy cleaning** of real documents | No personal data is left, in any layer | Personal data was removed under a named policy and reviewed |
 
+Each use has a *profile* that states what must stay exact (see 4). The uses
+conflict: the precise geometry that OCR training needs can also identify a
+source. So no profile removes a signal that its use needs.
+
 ### Goals
 
 - Change a PDF without moving anything that the use does not need to change:
@@ -108,18 +112,119 @@ a `family` entry in its manifest.
 ### 3.4 Anonymize (planned)
 
 Replace selected content with plausible content of the same type and the same
-size, in every layer of the document (see 4.6). Used for training data and
-for privacy cleaning.
+size, in every layer of the document (see 5.6). Used for training data and
+for privacy cleaning, under the `training` or `privacy` profile (see 4).
 
-## 4. Components
+## 4. Profiles: what each use keeps
 
-### 4.1 Content model (built)
+A change that helps one use can harm another. Exact skew, sub-point glyph
+positions and scan noise are what an OCR model must learn. The same values can
+also identify the source document. So docmutant has no single "clean" setting.
+Each run uses a *profile*. The profile states which signals must stay exact,
+which signals may change, and which oracles prove it.
+
+No profile normalizes by default. Normalization (canonical object numbers,
+rounded coordinates, standard page sizes) exists only in the `privacy`
+profile, and only at the level that the user asks for.
+
+### 4.1 Signals
+
+| Signal | Examples |
+|---|---|
+| Geometry | page size, CTMs (with skew and rotation), glyph origins and advances, word and line boxes, path coordinates, clip paths |
+| Text | shown character codes, `/ToUnicode`, text inside scanned images |
+| Glyph shapes | embedded font programs, Type3 glyph procedures |
+| Image samples | pixels, scan noise, compression artefacts |
+| Image geometry | width, height, bit depth, colour space, filter, placement, effective resolution |
+| Structure | tags, reading order, marked-content IDs, form fields, annotations |
+| Serialization | object numbers and order, `/ID`, incremental updates, producer quirks (for example the misspelled `/RelativeColormetric` that Acrobat Capture writes) |
+| Hidden text | metadata, outlines, alternate text, field values (see 5.6) |
+
+### 4.2 Profiles
+
+| Signal | `bug-repro` | `metamorphic` | `training` | `privacy` |
+|---|---|---|---|---|
+| Geometry | exact where the oracle needs it; the rest is removed | exact, except the one variable under test | exact | exact by default; rounding is an opt-in level |
+| Text | equal-width swap | changed only as the family says | changed; labels updated with it | personal data replaced |
+| Glyph shapes | removed unless the oracle needs them | exact | exact, or a metric-compatible substitute | substitute |
+| Image samples | flat grey or noise | exact | exact, or a content-aware replacement | replaced by image class |
+| Image geometry | exact | exact | exact | exact |
+| Structure | removed unless the oracle needs it | exact | exact | exact; values cleaned |
+| Serialization | not changed on purpose (qpdf rewrites it) | exact | any | normalized at the chosen level; reported |
+| Hidden text | removed | exact | changed with the visible text | changed or removed |
+
+**`bug-repro`** (built: the `reduce` mode). The oracle decides what stays.
+What the oracle needs stays bit-exact, even when it can identify the source.
+For example, the reduced Honda page keeps its skewed `cm` exactly, because the
+crash depends on it. The rest is removed or replaced. The claim is
+`copyright`. Remaining identifying values go into the evidence for the
+reviewer. The profile does not remove them.
+
+**`metamorphic`**. The two files of a pair differ in exactly one variable.
+All other signals stay exact, so that a changed result can only come from that
+variable. An invariant oracle checks each pair (see 3.3).
+
+**`training`**. Labels must stay true. A transform is allowed only when it
+keeps every label correct, or when it updates the label at the same time
+(label-consistent). Examples:
+
+- An equal-width text swap keeps word boxes. The transcription label is
+  rebuilt from the new codes through `/ToUnicode`.
+- Flat or noise image replacement is refused for an image that contains text
+  or that a label refers to: it removes what the label describes. Such images
+  stay exact, or get the planned text-in-scan replacement. That replacement
+  draws the new text into the image with the measured skew, glyph size, blur
+  and noise of the original.
+- Skew, sub-point positions, noise and compression artefacts are never
+  normalized.
+
+**`privacy`**. The only profile that normalizes. The user chooses a level:
+
+| Level | Changes | Cost to other uses |
+|---|---|---|
+| 0 (default) | none; the fingerprint report only | none |
+| 1 | serialization: canonical object order, new random `/ID`, no incremental updates, producer quirks corrected | none for geometry, text or images |
+| 2 | geometry: coordinates rounded to a grid, page size snapped to a standard size | degrades the signals that `training` keeps exact |
+
+The *fingerprint report* lists the values that stay and can link the output
+to its source: exact CTMs, the page size, image dimensions and resolution,
+font subset prefixes, producer quirks and object order. Later versions can
+estimate how rare each value is against a reference corpus. The reviewer signs
+the privacy attestation with the report in front of them.
+
+### 4.3 Kept signals are checked, not assumed
+
+Each "exact" cell in the table maps to an oracle that runs on every candidate:
+
+- geometry: the output's word boxes equal the source's within a tolerance
+  (pypdfium2 by default); the CTMs of kept units are equal;
+- image geometry: width, height, bit depth, colour space and filter are equal;
+- structure: the tag tree has the same shape and the same marked-content IDs;
+- labels (`training`): labels computed from the output equal the updated
+  labels.
+
+A mutation that breaks a kept signal is undone, as in the reduce mode. The
+manifest records the profile, each kept signal with its oracle result, and each
+changed signal with the mutators that changed it.
+
+### 4.4 Combined uses
+
+Training data from private documents needs both `training` and `privacy`.
+The privacy rules decide *which* values are personal data. The training rules
+decide *how* a replacement is made: label-consistent, and with no flat images
+in place of text. Privacy level 2 degrades training signals, so it is refused
+for training output unless the user names the degraded signals. The manifest
+then lists them, and users of the corpus can filter on them.
+
+## 5. Components
+
+### 5.1 Content model (built)
 
 `parse_units` turns a content stream into nested units and falls back to flat
 units when the stream is unbalanced. `reduce_units` runs ddmin top-down and
 unwraps containers.
 
-### 4.2 Text-position tracker (planned, next)
+### 5.2 Text-position tracker (planned, next)
 
 Semantic replacement and finer text reduction both need to know which bytes of
 which string drew which glyph, and where. The tracker replays the text state
@@ -135,7 +240,7 @@ With it, a region from any selector (a Docling item's box, a PII span) maps to
 exact string bytes, and a replacement can be written back without moving any
 other glyph.
 
-### 4.3 Fonts
+### 5.3 Fonts
 
 - **Width classes** (built): codes with equal advance width in a simple font or
   an Identity-H composite font, with ToUnicode spaces kept.
@@ -151,20 +256,20 @@ other glyph.
   Reserved Font Names) are honoured. This also removes the source's font
   program, which the copyright and privacy claims need.
 
-### 4.4 Images (built, basic)
+### 5.4 Images (built, basic)
 
 Samples are replaced at the same geometry. Planned: choose the treatment by
 the image's class (logo, signature, photo, chart, scanned text) from Docling's
 picture classification; for scanned text, replace the text in the image, not
 only the pixels.
 
-### 4.5 Vector graphics
+### 5.5 Vector graphics
 
 The reduce mode keeps the paths that the oracle needs, exactly. In the
 anonymize mode, recognisable illustrations that no oracle needs can be
 distorted (as pdf-mangler does) or removed.
 
-### 4.6 Hidden layers (planned)
+### 5.6 Hidden layers (planned)
 
 Text lives in more places than the content stream. The anonymize mode must
 change every one of them, consistently with the visible text, and keep the
@@ -182,7 +287,7 @@ document's tags valid:
 Keeping the tags valid means that a cleaned file from a tagged source stays as
 conformant (for example to PDF/UA) as it was.
 
-### 4.7 Semantic selection (planned)
+### 5.7 Semantic selection (planned)
 
 1. Convert the document with Docling (optional `docling` extra).
 2. Map each item (text, heading, table cell, key-value pair, form field,
@@ -200,7 +305,7 @@ conformant (for example to PDF/UA) as it was.
 Recall matters more than precision: the review report lists every replaced
 region and every text region that stayed, with the detector's confidence.
 
-### 4.8 Oracles
+### 5.8 Oracles
 
 | Oracle | Status |
 |---|---|
@@ -213,7 +318,7 @@ Every oracle runs the target in a child process. A target is any command with
 `{pdf}` and `{page}` placeholders, so Java, Rust and C++ tools work as well as
 Python ones.
 
-### 4.9 Evidence (built, partial)
+### 5.9 Evidence (built, partial)
 
 Built: words shared with the source page (pypdfium2 text), source images kept
 (sample hashes), source font programs kept (program hashes), render dHash
@@ -221,22 +326,27 @@ distance, and a count of the remaining units by kind. Planned: SSIM, n-gram
 overlap, region crops for reverse image search with the original as a positive
 control, and a side-by-side render for the reviewer.
 
-### 4.10 Manifest and claims (built: schema 0.1)
+### 5.10 Manifest and claims (built: schema 0.1)
 
 The manifest records tier, source, fonts, mutations, generator, oracle results,
 family, evidence, attestation and takedown contact, and enforces the corpus
-policy (see `CORPUS-LICENSES.md`). Schema 0.2 adds `claims`: a list of
-`copyright`, `training` and `privacy`, each with its own required evidence and
-attestation statement.
+policy (see `CORPUS-LICENSES.md`). Schema 0.2 adds:
 
-### 4.11 Attestation
+- `claims`: a list of `copyright`, `training` and `privacy`, each with its own
+  required evidence and attestation statement;
+- `profile`, with `preserved` (each kept signal and its oracle result) and
+  `changed` (each changed signal and its mutators);
+- `fingerprint` (`privacy` only): the normalization level and the fingerprint
+  report.
+
+### 5.11 Attestation
 
 A claim that needs judgment needs a named reviewer, a checklist version and a
 statement version (`docs/ATTESTATION.md`). The copyright statement exists as a
 draft. A privacy statement ("personal data removed under policy X") follows the
 same pattern. CI refuses corpus files whose claims lack the required review.
 
-## 5. Interfaces (sketch)
+## 6. Interfaces (sketch)
 
 ```python
 class Mutator(Protocol):
@@ -258,7 +368,7 @@ class Oracle(Protocol):
     def check(self, pdf: Path, page: int) -> CheckResult: ...
 ```
 
-## 6. Integration
+## 7. Integration
 
 - **docling-parse regression dataset.** Derived files with manifests can
   supply real-document evidence where the original cannot be shared. The
@@ -272,24 +382,24 @@ class Oracle(Protocol):
   anonymize mode, and form-template creation (remove filled values, keep labels,
   add fields) on top of the same selectors and mutators.
 
-## 7. Dependencies and licensing
+## 8. Dependencies and licensing
 
 Code: MIT. Required: pikepdf (MPL-2.0), pypdfium2 (Apache-2.0 or BSD-3-Clause),
 pydantic (MIT). Planned optional: fontTools (MIT), docling (MIT), presidio
 (MIT), Faker (MIT). No dependency's code is copied into docmutant's files.
 
-## 8. Roadmap
+## 9. Roadmap
 
 | Milestone | Content | Status |
 |---|---|---|
 | M1 | Manifest, policy validation, CLI | done |
 | M2 | Reduce mode for rendering bugs, crash/hang oracles, basic evidence | built; first real-document runs in progress |
-| M3 | Text-position tracker; render-difference oracle | next |
+| M3 | Text-position tracker; render-difference oracle; geometry and image-geometry preservation oracles | next |
 | M4 | Font glyph availability and metric-compatible substitution | |
-| M5 | Hidden layers; anonymize mode with Docling selection; schema 0.2 claims | |
+| M5 | Hidden layers; anonymize mode with Docling selection; profiles; privacy normalization levels and fingerprint report; schema 0.2 | |
 | M6 | Fuzz and metamorphic modes; corpus packaging | |
 
-## 9. Open questions
+## 10. Open questions
 
 - Will the maintainers of corpora (docling-parse's regression dataset,
   opendataloader-bench) accept derived files as evidence, and with which claims?
@@ -297,3 +407,7 @@ pydantic (MIT). Planned optional: fontTools (MIT), docling (MIT), presidio
 - Text in images: which OCR to use for evidence and replacement, without making
   the core depend on a model.
 - Tolerances for the render-difference oracle across renderers.
+- The tolerance for "exact" word boxes when the geometry oracle and the
+  user's target use different text engines.
+- How to model text-in-scan replacement so that OCR training data keeps the
+  noise and skew statistics of the original scan.
