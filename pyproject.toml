@@ -1,0 +1,47 @@
+[project]
+name = "docmutant"
+version = "0.0.1"
+description = "Structure-aware PDF mutation with oracles: reduce, sanitize, fuzz and build metamorphic variants, with a provenance manifest for every file."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "YRA Tech" }]
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.7",
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Text Processing",
+]
+
+[project.urls]
+Repository = "https://github.com/YRA-Tech/docmutant"
+Issues = "https://github.com/YRA-Tech/docmutant/issues"
+
+[project.scripts]
+docmutant = "docmutant.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
