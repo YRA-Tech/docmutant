@@ -185,6 +185,15 @@ def _direct_dictionaries(obj: pikepdf.Object) -> Iterator[pikepdf.Object]:
         )
 
 
+def _members(value: object) -> Iterator[pikepdf.Object]:
+    """Dictionaries listed in an /OCGs or /VE value, direct or indirect, at any depth."""
+    if isinstance(value, pikepdf.Dictionary):
+        yield value
+    elif isinstance(value, pikepdf.Array):
+        for item in value:
+            yield from _members(item)
+
+
 def strip_marked_content_text(pdf: pikepdf.Pdf) -> int:
     """Reduce marked-content and optional-content properties to structural keys and values.
 
@@ -222,11 +231,10 @@ def strip_marked_content_text(pdf: pikepdf.Pdf) -> int:
         if kind == "/OCG" and not _PLACEHOLDER_NAME.fullmatch(str(entry.get("/Name", ""))):
             layers[0] += 1
             entry.Name = pikepdf.String(f"Layer {layers[0]}")
+            count += 1  # a rename is a change: callers must write the result back
         for key in ("/OCGs", "/VE"):
             if key in entry:
-                count += sum(clean(d) for d in _direct_dictionaries(entry[key]) if d is not entry)
-                if isinstance(entry[key], pikepdf.Dictionary):
-                    count += clean(entry[key])
+                count += sum(clean(member) for member in _members(entry[key]))
         return count
 
     count = 0

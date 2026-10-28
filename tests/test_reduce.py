@@ -279,3 +279,27 @@ def test_properties_in_direct_resources_and_wrong_value_types_are_cleaned() -> N
     for instruction in pikepdf.parse_content_stream(form):
         if str(instruction.operator) == "BDC":
             assert dict(instruction.operands[1].items()) == {"/P": pikepdf.Name.Art}
+
+
+def test_ocg_members_are_cleaned_and_renames_are_written_back() -> None:
+    pdf = pikepdf.Pdf.new()
+    # An indirect /OCGs member without /Type: no other pass would recognise it.
+    untyped = pdf.make_indirect(pikepdf.Dictionary(Alt=pikepdf.String(SECRET)))
+    content = (
+        f"/OC <</Type /OCMD /OCGs [<</Type /OCG /Name ({SECRET})>>]>> BDC 0 0 1 1 re f EMC"
+    ).encode()
+    pdf.add_blank_page()
+    page = pdf.pages[0]
+    page.Contents = pdf.make_stream(content)
+    page.Resources = pikepdf.Dictionary(
+        Properties=pikepdf.Dictionary(
+            OC1=pikepdf.Dictionary(Type=pikepdf.Name.OCMD, VE=[pikepdf.Name.And, untyped])
+        )
+    )
+
+    strip_marked_content_text(pdf)
+
+    assert "/Alt" not in untyped
+    (instruction,) = [i for i in pikepdf.parse_content_stream(page) if str(i.operator) == "BDC"]
+    member = instruction.operands[1].OCGs[0]
+    assert str(member.Name) == "Layer 1"
