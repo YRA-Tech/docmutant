@@ -8,11 +8,12 @@ exactly those bytes, and its box on the page, so that an oracle can compare
 geometry before and after.
 
 Simple fonts (Type1, MMType1, TrueType) with a ``/Widths`` array are supported,
-and composite (Type0) fonts with horizontal writing whose CMap is
-``/Identity-H`` or embedded. Type3 fonts, standard fonts that rely on built-in
-metrics instead of ``/Widths``, vertical writing and predefined CMaps other than
+Type3 fonts (through their ``/FontMatrix``), and composite (Type0) fonts with
+horizontal writing whose CMap is ``/Identity-H`` or embedded. Form XObjects are
+followed with their ``/Matrix``. Standard fonts that rely on built-in metrics
+instead of ``/Widths``, vertical writing and predefined CMaps other than
 Identity raise ``UnsupportedText``: without their metrics, every later glyph in
-the text object would be misplaced. Form XObjects are not followed yet.
+the text object would be misplaced.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from typing import Literal
 import pikepdf
 
 from docmutant.content import Instruction, operator_name
-from docmutant.mutate import SIMPLE_FONT_SUBTYPES, cid_widths
+from docmutant.mutate import SIMPLE_FONT_SUBTYPES, StreamRef, cid_widths
 
 Point = tuple[float, float]
 WidthSource = Literal["widths", "missing-width", "default-width", "none"]
@@ -43,6 +44,9 @@ class UnsupportedText(Exception):
 @dataclass(frozen=True)
 class Glyph:
     """One character code shown by a text operator."""
+
+    stream: StreamRef
+    """The page or form XObject whose content stream holds the instruction."""
 
     instruction: int
     """Index of the text-showing instruction in the parsed content stream."""
@@ -65,7 +69,8 @@ class Glyph:
 
     size: float
     width: float
-    """Advance width in glyph space (thousandths of a text space unit)."""
+    """Advance width in glyph space: thousandths of a text space unit, except in a
+    Type3 font, whose ``/FontMatrix`` defines the unit."""
 
     origin: Point
     """Start of the glyph on the baseline, in default user space."""
@@ -204,6 +209,9 @@ class _Font:
     cmap: _CMap | None = None
     """None for a simple font: one byte per code."""
 
+    matrix: pikepdf.Matrix = pikepdf.Matrix(0.001, 0, 0, 0.001, 0, 0)
+    """Glyph space to text space: the ``/FontMatrix`` of a Type3 font."""
+
     def codes(self, data: bytes) -> Iterator[tuple[int, int, int, int | None]]:
         """Yield offset, length, code and CID for each code in ``data``."""
         if self.cmap is None:
@@ -221,24 +229,29 @@ class _Font:
         return 0.0, "none"
 
 
-def _vertical_extent(descriptor: pikepdf.Object | None) -> tuple[float, float, HeightSource]:
+def _vertical_extent(
+    descriptor: pikepdf.Object | None,
+    font_bbox: pikepdf.Object | None = None,
+    default: tuple[float, float] = (DEFAULT_ASCENT, DEFAULT_DESCENT),
+) -> tuple[float, float, HeightSource]:
+    """Ascent and descent in glyph space, from the descriptor, a font box or ``default``."""
     ascent = descent = 0.0
     if descriptor is not None:
         ascent = float(descriptor.get("/Ascent", 0))
         descent = float(descriptor.get("/Descent", 0))
     if ascent > descent:
         return ascent, descent, "ascent"
-    bbox = descriptor.get("/FontBBox") if descriptor is not None else None
-    if bbox is not None and len(bbox) == 4 and float(bbox[3]) > float(bbox[1]):
-        return float(bbox[3]), float(bbox[1]), "font-bbox"
-    return DEFAULT_ASCENT, DEFAULT_DESCENT, "default"
+    for bbox in (descriptor.get("/FontBBox") if descriptor is not None else None, font_bbox):
+        if bbox is not None and len(bbox) == 4 and float(bbox[3]) > float(bbox[1]):
+            return float(bbox[3]), float(bbox[1]), "font-bbox"
+    return *default, "default"
 
 
 def _font(name: str, font: pikepdf.Object) -> _Font:
     subtype = font.get("/Subtype")
     if subtype == "/Type0":
         return _composite_font(name, font)
-    if subtype not in SIMPLE_FONT_SUBTYPES:
+    if subtype not in SIMPLE_FONT_SUBTYPES and subtype != "/Type3":
         raise UnsupportedText(f"font {name} has subtype {subtype}")
     if "/Widths" not in font:
         raise UnsupportedText(f"font {name} has no /Widths (built-in metrics)")
@@ -247,11 +260,21 @@ def _font(name: str, font: pikepdf.Object) -> _Font:
     if descriptor is not None and "/MissingWidth" in descriptor:
         missing_width = float(descriptor.MissingWidth)
     first = int(font.get("/FirstChar", 0))
+    widths = {first + i: float(w) for i, w in enumerate(font.Widths)}
+    if subtype != "/Type3":
+        return _Font(widths, missing_width, "missing-width", *_vertical_extent(descriptor))
+
+    matrix = pikepdf.Matrix(*map(float, font.get("/FontMatrix", [0.001, 0, 0, 0.001, 0, 0])))
+    if matrix.a == 0 or matrix.d == 0:
+        raise UnsupportedText(f"font {name} has a FontMatrix that rotates or collapses glyphs")
+    # The default extent is in text space; a Type3 glyph space has its own unit.
+    default = (DEFAULT_ASCENT / 1000 / matrix.d, DEFAULT_DESCENT / 1000 / matrix.d)
     return _Font(
-        {first + i: float(w) for i, w in enumerate(font.Widths)},
+        widths,
         missing_width,
         "missing-width",
-        *_vertical_extent(descriptor),
+        *_vertical_extent(descriptor, font.get("/FontBBox"), default),
+        matrix=matrix,
     )
 
 
@@ -290,138 +313,184 @@ class _State:
     rise: float = 0.0
     render_mode: int = 0
     font: str | None = None
+    font_object: pikepdf.Object | None = None
+    """The font that ``Tf`` selected: a form inherits the font, not its resource name."""
+
     size: float = 0.0
 
 
-def trace(instructions: Sequence[Instruction], resources: pikepdf.Object | None) -> Iterator[Glyph]:
-    """Yield the glyphs shown by ``instructions``, in content-stream order."""
-    fonts: dict[str, _Font] = {}
-    font_resources = resources.get("/Font") if resources is not None else None
-    properties = resources.get("/Properties") if resources is not None else None
-
-    def font_metrics(name: str) -> _Font:
-        if name not in fonts:
-            font = font_resources.get(name) if font_resources is not None else None
-            if font is None:
-                raise UnsupportedText(f"font {name} is not in the resources")
-            fonts[name] = _font(name, font)
-        return fonts[name]
-
-    state = _State()
-    saved: list[_State] = []
+def trace(
+    instructions: Sequence[Instruction], resources: pikepdf.Object | None, stream: StreamRef
+) -> Iterator[Glyph]:
+    """Yield the glyphs shown by ``instructions`` and the forms they draw, in drawing order."""
+    fonts: dict[object, _Font] = {}
+    parsed_forms: dict[tuple[int, int], list[Instruction]] = {}
+    drawing: set[tuple[int, int]] = set()
     marked: list[int | None] = []
-    text_matrix = line_matrix = pikepdf.Matrix()
 
-    def next_line(tx: float, ty: float) -> None:
-        nonlocal text_matrix, line_matrix
-        line_matrix = pikepdf.Matrix(1, 0, 0, 1, tx, ty) @ line_matrix
-        text_matrix = line_matrix
+    def font_metrics(state: _State) -> _Font:
+        font = state.font_object
+        if font is None:
+            raise UnsupportedText(f"font {state.font} is not in the resources")
+        key = font.objgen if font.is_indirect else id(font)
+        if key not in fonts:
+            fonts[key] = _font(str(state.font), font)
+        return fonts[key]
 
-    def show(string: pikepdf.String, index: int, operand: int) -> Iterator[Glyph]:
-        nonlocal text_matrix
-        if state.font is None:
-            raise UnsupportedText(f"instruction {index} shows text before Tf")
-        metrics = font_metrics(state.font)
-        mcid = next((m for m in reversed(marked) if m is not None), None)
-        for offset, length, code, cid in metrics.codes(bytes(string)):
-            width, width_from = metrics.width(code if cid is None else cid)
-            glyph_space = pikepdf.Matrix(
-                state.size * state.scale / 1000, 0, 0, state.size / 1000, 0, state.rise
+    def form(
+        xobject: pikepdf.Stream, resources: pikepdf.Object | None, state: _State, page_index: int
+    ) -> Iterator[Glyph]:
+        objgen = xobject.objgen
+        if objgen in drawing:
+            raise UnsupportedText(f"form {objgen[0]} {objgen[1]} draws itself")
+        if objgen not in parsed_forms:
+            parsed_forms[objgen] = list(pikepdf.parse_content_stream(xobject))
+        matrix = pikepdf.Matrix(*map(float, xobject.get("/Matrix", [1, 0, 0, 1, 0, 0])))
+        depth = len(marked)
+        drawing.add(objgen)
+        try:
+            yield from run(
+                parsed_forms[objgen],
+                xobject.get("/Resources", resources),
+                StreamRef("form", page_index, objgen),
+                replace(state, ctm=matrix @ state.ctm),
             )
-            to_page = glyph_space @ text_matrix @ state.ctm
-            corners = (
-                (0.0, metrics.descent),
-                (width, metrics.descent),
-                (width, metrics.ascent),
-                (0.0, metrics.ascent),
-            )
-            yield Glyph(
-                instruction=index,
-                operand=operand,
-                offset=offset,
-                length=length,
-                code=code,
-                cid=cid,
-                font=state.font,
-                size=state.size,
-                width=width,
-                origin=to_page.transform((0.0, 0.0)),
-                box=tuple(to_page.transform(corner) for corner in corners),
-                render_mode=state.render_mode,
-                mcid=mcid,
-                width_from=width_from,
-                height_from=metrics.height_from,
-            )
-            advance = width / 1000 * state.size + state.char_spacing
-            if code == 32 and length == 1:
-                advance += state.word_spacing
-            text_matrix = pikepdf.Matrix(1, 0, 0, 1, advance * state.scale, 0) @ text_matrix
+        finally:
+            drawing.discard(objgen)
+            del marked[depth:]
 
-    for index, instruction in enumerate(instructions):
-        op = operator_name(instruction)
-        operands = [] if op == "INLINE IMAGE" else list(instruction.operands)
+    def run(
+        instructions: Sequence[Instruction],
+        resources: pikepdf.Object | None,
+        stream: StreamRef,
+        state: _State,
+    ) -> Iterator[Glyph]:
+        font_resources = resources.get("/Font") if resources is not None else None
+        xobjects = resources.get("/XObject") if resources is not None else None
+        properties = resources.get("/Properties") if resources is not None else None
+        saved: list[_State] = []
+        text_matrix = line_matrix = pikepdf.Matrix()
 
-        if op == "q":
-            saved.append(state)
-        elif op == "Q":
-            if saved:
-                state = saved.pop()
-        elif op == "cm":
-            state = replace(state, ctm=pikepdf.Matrix(*map(float, operands)) @ state.ctm)
-        elif op == "BT":
-            text_matrix = line_matrix = pikepdf.Matrix()
-        elif op == "Tc":
-            state = replace(state, char_spacing=float(operands[0]))
-        elif op == "Tw":
-            state = replace(state, word_spacing=float(operands[0]))
-        elif op == "Tz":
-            state = replace(state, scale=float(operands[0]) / 100)
-        elif op == "TL":
-            state = replace(state, leading=float(operands[0]))
-        elif op == "Ts":
-            state = replace(state, rise=float(operands[0]))
-        elif op == "Tr":
-            state = replace(state, render_mode=int(operands[0]))
-        elif op == "Tf":
-            state = replace(state, font=str(operands[0]), size=float(operands[1]))
-        elif op == "Td":
-            next_line(float(operands[0]), float(operands[1]))
-        elif op == "TD":
-            state = replace(state, leading=-float(operands[1]))
-            next_line(float(operands[0]), float(operands[1]))
-        elif op == "Tm":
-            text_matrix = line_matrix = pikepdf.Matrix(*map(float, operands))
-        elif op == "T*":
-            next_line(0.0, -state.leading)
-        elif op == "Tj":
-            yield from show(operands[0], index, 0)
-        elif op == "'":
-            next_line(0.0, -state.leading)
-            yield from show(operands[0], index, 0)
-        elif op == '"':
-            state = replace(state, word_spacing=float(operands[0]), char_spacing=float(operands[1]))
-            next_line(0.0, -state.leading)
-            yield from show(operands[2], index, 2)
-        elif op == "TJ":
-            for operand, item in enumerate(operands[0]):
-                if isinstance(item, pikepdf.String):
-                    yield from show(item, index, operand)
-                else:
-                    shift = -float(item) / 1000 * state.size * state.scale
-                    text_matrix = pikepdf.Matrix(1, 0, 0, 1, shift, 0) @ text_matrix
-        elif op == "BMC":
-            marked.append(None)
-        elif op == "BDC":
-            props = operands[1]
-            if isinstance(props, pikepdf.Name) and properties is not None:
-                props = properties.get(props)
-            mcid = props.get("/MCID") if isinstance(props, pikepdf.Dictionary) else None
-            marked.append(int(mcid) if mcid is not None else None)
-        elif op == "EMC" and marked:
-            marked.pop()
+        def next_line(tx: float, ty: float) -> None:
+            nonlocal text_matrix, line_matrix
+            line_matrix = pikepdf.Matrix(1, 0, 0, 1, tx, ty) @ line_matrix
+            text_matrix = line_matrix
+
+        def show(string: pikepdf.String, index: int, operand: int) -> Iterator[Glyph]:
+            nonlocal text_matrix
+            if state.font is None:
+                raise UnsupportedText(f"instruction {index} shows text before Tf")
+            metrics = font_metrics(state)
+            mcid = next((m for m in reversed(marked) if m is not None), None)
+            text_space = pikepdf.Matrix(state.size * state.scale, 0, 0, state.size, 0, state.rise)
+            for offset, length, code, cid in metrics.codes(bytes(string)):
+                width, width_from = metrics.width(code if cid is None else cid)
+                to_page = metrics.matrix @ text_space @ text_matrix @ state.ctm
+                corners = (
+                    (0.0, metrics.descent),
+                    (width, metrics.descent),
+                    (width, metrics.ascent),
+                    (0.0, metrics.ascent),
+                )
+                yield Glyph(
+                    stream=stream,
+                    instruction=index,
+                    operand=operand,
+                    offset=offset,
+                    length=length,
+                    code=code,
+                    cid=cid,
+                    font=state.font,
+                    size=state.size,
+                    width=width,
+                    origin=to_page.transform((0.0, 0.0)),
+                    box=tuple(to_page.transform(corner) for corner in corners),
+                    render_mode=state.render_mode,
+                    mcid=mcid,
+                    width_from=width_from,
+                    height_from=metrics.height_from,
+                )
+                advance = width * metrics.matrix.a * state.size + state.char_spacing
+                if code == 32 and length == 1:
+                    advance += state.word_spacing
+                text_matrix = pikepdf.Matrix(1, 0, 0, 1, advance * state.scale, 0) @ text_matrix
+
+        for index, instruction in enumerate(instructions):
+            op = operator_name(instruction)
+            operands = [] if op == "INLINE IMAGE" else list(instruction.operands)
+
+            if op == "q":
+                saved.append(state)
+            elif op == "Q":
+                if saved:
+                    state = saved.pop()
+            elif op == "cm":
+                state = replace(state, ctm=pikepdf.Matrix(*map(float, operands)) @ state.ctm)
+            elif op == "BT":
+                text_matrix = line_matrix = pikepdf.Matrix()
+            elif op == "Tc":
+                state = replace(state, char_spacing=float(operands[0]))
+            elif op == "Tw":
+                state = replace(state, word_spacing=float(operands[0]))
+            elif op == "Tz":
+                state = replace(state, scale=float(operands[0]) / 100)
+            elif op == "TL":
+                state = replace(state, leading=float(operands[0]))
+            elif op == "Ts":
+                state = replace(state, rise=float(operands[0]))
+            elif op == "Tr":
+                state = replace(state, render_mode=int(operands[0]))
+            elif op == "Tf":
+                font = font_resources.get(operands[0]) if font_resources is not None else None
+                state = replace(
+                    state, font=str(operands[0]), font_object=font, size=float(operands[1])
+                )
+            elif op == "Td":
+                next_line(float(operands[0]), float(operands[1]))
+            elif op == "TD":
+                state = replace(state, leading=-float(operands[1]))
+                next_line(float(operands[0]), float(operands[1]))
+            elif op == "Tm":
+                text_matrix = line_matrix = pikepdf.Matrix(*map(float, operands))
+            elif op == "T*":
+                next_line(0.0, -state.leading)
+            elif op == "Tj":
+                yield from show(operands[0], index, 0)
+            elif op == "'":
+                next_line(0.0, -state.leading)
+                yield from show(operands[0], index, 0)
+            elif op == '"':
+                state = replace(
+                    state, word_spacing=float(operands[0]), char_spacing=float(operands[1])
+                )
+                next_line(0.0, -state.leading)
+                yield from show(operands[2], index, 2)
+            elif op == "TJ":
+                for operand, item in enumerate(operands[0]):
+                    if isinstance(item, pikepdf.String):
+                        yield from show(item, index, operand)
+                    else:
+                        shift = -float(item) / 1000 * state.size * state.scale
+                        text_matrix = pikepdf.Matrix(1, 0, 0, 1, shift, 0) @ text_matrix
+            elif op == "Do":
+                xobject = xobjects.get(operands[0]) if xobjects is not None else None
+                if isinstance(xobject, pikepdf.Stream) and xobject.get("/Subtype") == "/Form":
+                    yield from form(xobject, resources, state, stream.page_index)
+            elif op == "BMC":
+                marked.append(None)
+            elif op == "BDC":
+                props = operands[1]
+                if isinstance(props, pikepdf.Name) and properties is not None:
+                    props = properties.get(props)
+                mcid = props.get("/MCID") if isinstance(props, pikepdf.Dictionary) else None
+                marked.append(int(mcid) if mcid is not None else None)
+            elif op == "EMC" and marked:
+                marked.pop()
+
+    yield from run(instructions, resources, stream, _State())
 
 
 def trace_page(page: pikepdf.Page) -> list[Glyph]:
-    """All glyphs drawn by the page's own content streams."""
+    """All glyphs that the page draws, including those in its form XObjects."""
     instructions = list(pikepdf.parse_content_stream(page))
-    return list(trace(instructions, page.obj.get("/Resources")))
+    return list(trace(instructions, page.obj.get("/Resources"), StreamRef("page", page.index)))

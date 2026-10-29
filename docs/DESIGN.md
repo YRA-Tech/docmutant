@@ -307,22 +307,27 @@ With it, a region from any selector (a Docling item's box, a PII span) maps to
 exact string bytes, and a replacement can be written back without moving any
 other glyph.
 
-Built (`tracker.py`): page content streams with simple fonts that have
-`/Widths`, and composite fonts with horizontal writing whose CMap is
-`/Identity-H` or embedded (codes of 1 to 4 bytes, `/W`, `/DW`). Each glyph also records its text render mode (3 is the invisible
+Built (`tracker.py`): page content streams and the form XObjects they draw
+(with each form's `/Matrix`, nested forms included), with simple fonts that
+have `/Widths`, Type3 fonts (through their `/FontMatrix`), and composite fonts
+with horizontal writing whose CMap is `/Identity-H` or embedded (codes of 1 to
+4 bytes, `/W`, `/DW`). Each glyph names the stream that holds its instruction,
+so a glyph in a form is addressed in the form, not in the page. Each glyph also records its text render mode (3 is the invisible
 OCR layer of a scan) and where its width and height came from: `/Widths`,
 `/MissingWidth`, the descriptor's `/Ascent` and `/Descent`, `/FontBBox`, or a
 default. Text that the tracker cannot place raises an error, so that no glyph
-is silently misplaced. Glyph origins match pdfium's character origins within
-0.05 pt on the real documents tested so far.
+is silently misplaced. On the real documents tested so far, glyph origins match
+pdfium's character origins within 0.1 pt, apart from spaces that pdfium leaves
+out and one known difference: pdfium truncates fractional widths to whole glyph
+units, so its origins fall behind the tracker's along a string (0.14 pt after
+about 40 glyphs at 12 pt).
 
 Planned, in order:
 
-1. Built-in metrics for the 14 standard fonts, which older PDFs use without
+1. Words and lines, grouped from the glyphs.
+2. Built-in metrics for the 14 standard fonts, which older PDFs use without
    `/Widths`.
-2. Form XObjects (with their `/Matrix`) and Type3 fonts (with their
-   `/FontMatrix`); structure elements from the parent tree.
-3. Words and lines, grouped from the glyphs.
+3. Structure elements, from the marked-content IDs and the parent tree.
 4. A cross-check of boxes against pypdfium2 (see the open questions).
 5. Vertical writing (`/Identity-V`, `/W2`, `/DW2`) and the predefined CJK
    CMaps, which need Adobe's CMap resources.
@@ -496,6 +501,8 @@ pydantic (MIT). Planned optional: fontTools (MIT), docling (MIT), presidio
 - Tolerances for the render-difference oracle across renderers.
 - How much measurement difference to allow, on top of the box tolerance, when
   a text engine (pypdfium2 or the user's target) reports the word boxes
-  instead of the tracker.
+  instead of the tracker. A fixed allowance per glyph is not enough: an
+  engine that rounds widths (pdfium truncates them) drifts further from the
+  tracker with each glyph until the next positioning operator.
 - How to model text-in-scan replacement so that OCR training data keeps the
   noise and skew statistics of the original scan.
