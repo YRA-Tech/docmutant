@@ -291,7 +291,7 @@ then lists them, and users of the corpus can filter on them.
 units when the stream is unbalanced. `reduce_units` runs ddmin top-down and
 unwraps containers.
 
-### 5.2 Text-position tracker (planned, next)
+### 5.2 Text-position tracker (built, partial)
 
 Semantic replacement and finer text reduction both need to know which bytes of
 which string drew which glyph, and where. The tracker replays the text state
@@ -306,6 +306,24 @@ CTM) and yields, for every glyph:
 With it, a region from any selector (a Docling item's box, a PII span) maps to
 exact string bytes, and a replacement can be written back without moving any
 other glyph.
+
+Built (`tracker.py`): page content streams with simple fonts that have
+`/Widths`. Each glyph also records its text render mode (3 is the invisible
+OCR layer of a scan) and where its width and height came from: `/Widths`,
+`/MissingWidth`, the descriptor's `/Ascent` and `/Descent`, `/FontBBox`, or a
+default. Text that the tracker cannot place raises an error, so that no glyph
+is silently misplaced. Glyph origins match pdfium's character origins within
+0.05 pt on the real documents tested so far.
+
+Planned, in order:
+
+1. Type0 fonts: 2-byte and CMap codes, `/W`, `/DW`, vertical writing.
+2. Built-in metrics for the 14 standard fonts, which older PDFs use without
+   `/Widths`.
+3. Form XObjects (with their `/Matrix`) and Type3 fonts (with their
+   `/FontMatrix`); structure elements from the parent tree.
+4. Words and lines, grouped from the glyphs.
+5. A cross-check of boxes against pypdfium2 (see the open questions).
 
 ### 5.3 Fonts
 
