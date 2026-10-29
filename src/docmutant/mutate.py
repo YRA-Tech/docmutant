@@ -399,7 +399,7 @@ def font_codes(font: pikepdf.Object) -> FontCodes | None:
     if subtype == "/Type0" and font.get("/Encoding") == "/Identity-H":
         descendant = font.DescendantFonts[0]
         default = float(descendant.get("/DW", 1000))
-        widths = _cid_widths(descendant.get("/W"))
+        widths = cid_widths(descendant.get("/W"))
         if not widths:
             return None
         keep = frozenset(_tounicode_spaces(font.get("/ToUnicode")))
@@ -408,7 +408,7 @@ def font_codes(font: pikepdf.Object) -> FontCodes | None:
     return None
 
 
-def _cid_widths(w_array: pikepdf.Object | None) -> dict[int, float]:
+def cid_widths(w_array: pikepdf.Object | None) -> dict[int, float]:
     widths: dict[int, float] = {}
     if w_array is None:
         return widths

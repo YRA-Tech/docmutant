@@ -49,6 +49,21 @@ def _close(actual, expected, tolerance=1e-6) -> bool:
     return all(abs(a - e) <= tolerance for a, e in zip(actual, expected, strict=True))
 
 
+def _pdfium_origins(pdf: pikepdf.Pdf) -> list[tuple[float, float]]:
+    """Origins of the characters pdfium reads from page 1, without the ones it generates."""
+    buffer = io.BytesIO()
+    pdf.save(buffer)
+    textpage = pdfium.PdfDocument(buffer.getvalue())[0].get_textpage()
+    origins = []
+    for index in range(textpage.count_chars()):
+        if pdfium_c.FPDFText_IsGenerated(textpage.raw, index) == 1:
+            continue
+        x, y = ctypes.c_double(), ctypes.c_double()
+        pdfium_c.FPDFText_GetCharOrigin(textpage.raw, index, ctypes.byref(x), ctypes.byref(y))
+        origins.append((x.value, y.value))
+    return origins
+
+
 def test_tj_origins_and_box():
     pdf = _pdf(b"BT /F1 10 Tf 72 700 Td (AB) Tj ET")
     first, second = trace_page(pdf.pages[0])
@@ -111,16 +126,10 @@ def test_rotated_scaled_text_matches_pdfium():
     )
     pdf = _pdf(content, HELVETICA_WIDTHS)
     glyphs = trace_page(pdf.pages[0])
-
-    buffer = io.BytesIO()
-    pdf.save(buffer)
-    document = pdfium.PdfDocument(buffer.getvalue())
-    textpage = document[0].get_textpage()
-    assert textpage.count_chars() == len(glyphs) == 5
-    for index, glyph in enumerate(glyphs):
-        x, y = ctypes.c_double(), ctypes.c_double()
-        pdfium_c.FPDFText_GetCharOrigin(textpage.raw, index, ctypes.byref(x), ctypes.byref(y))
-        assert _close(glyph.origin, (x.value, y.value), tolerance=0.01)
+    origins = _pdfium_origins(pdf)
+    assert len(origins) == len(glyphs) == 5
+    for glyph, origin in zip(glyphs, origins, strict=True):
+        assert _close(glyph.origin, origin, tolerance=0.01)
 
 
 def test_marked_content_ids():
@@ -179,16 +188,159 @@ def test_width_outside_the_table():
     [
         (b"BT (A) Tj ET", "before Tf"),
         (b"BT /F9 10 Tf (A) Tj ET", "not in the resources"),
-        (b"BT /F2 10 Tf (A) Tj ET", "/Type0"),
+        (b"BT /F2 10 Tf (A) Tj ET", "/Type3"),
         (b"BT /F3 10 Tf (A) Tj ET", "no /Widths"),
     ],
 )
 def test_text_that_cannot_be_placed(content, message):
     pdf = _pdf(content)
     fonts = pdf.pages[0].obj.Resources.Font
-    fonts.F2 = pikepdf.Dictionary(Type=pikepdf.Name.Font, Subtype=pikepdf.Name.Type0)
+    fonts.F2 = pikepdf.Dictionary(Type=pikepdf.Name.Font, Subtype=pikepdf.Name.Type3)
     fonts.F3 = pikepdf.Dictionary(
         Type=pikepdf.Name.Font, Subtype=pikepdf.Name.Type1, BaseFont=pikepdf.Name.Helvetica
     )
     with pytest.raises(UnsupportedText, match=message):
         trace_page(pdf.pages[0])
+
+
+def _type0_pdf(
+    content: bytes, encoding, w: list | None = None, dw: int | None = None
+) -> pikepdf.Pdf:
+    pdf = pikepdf.Pdf.new()
+    page = pdf.add_blank_page(page_size=(612, 792))
+    descendant = pikepdf.Dictionary(
+        Type=pikepdf.Name.Font,
+        Subtype=pikepdf.Name.CIDFontType2,
+        BaseFont=pikepdf.Name.Arial,
+        CIDSystemInfo=pikepdf.Dictionary(
+            Registry=pikepdf.String("Adobe"), Ordering=pikepdf.String("Identity"), Supplement=0
+        ),
+        FontDescriptor=pdf.make_indirect(
+            pikepdf.Dictionary(
+                Type=pikepdf.Name.FontDescriptor,
+                FontName=pikepdf.Name.Arial,
+                Ascent=905,
+                Descent=-212,
+            )
+        ),
+    )
+    if w is not None:
+        descendant.W = w
+    if dw is not None:
+        descendant.DW = dw
+    if isinstance(encoding, bytes):
+        encoding = pdf.make_stream(encoding)
+    font = pikepdf.Dictionary(
+        Type=pikepdf.Name.Font,
+        Subtype=pikepdf.Name.Type0,
+        BaseFont=pikepdf.Name.Arial,
+        Encoding=encoding,
+        DescendantFonts=[pdf.make_indirect(descendant)],
+    )
+    page.obj.Resources = pikepdf.Dictionary(Font=pikepdf.Dictionary(F1=pdf.make_indirect(font)))
+    page.obj.Contents = pdf.make_stream(content)
+    return pdf
+
+
+def test_identity_h_codes_widths_and_word_spacing():
+    # The 2-byte code 0x0020 is not a space for Tw: only the 1-byte code 32 is.
+    content = b"BT /F1 10 Tf 5 Tw <0001 0020 0003> Tj ET"
+    pdf = _type0_pdf(content, pikepdf.Name("/Identity-H"), w=[1, [600], 32, [250]], dw=500)
+    glyphs = trace_page(pdf.pages[0])
+    assert [(g.offset, g.length, g.code, g.cid) for g in glyphs] == [
+        (0, 2, 1, 1),
+        (2, 2, 32, 32),
+        (4, 2, 3, 3),
+    ]
+    assert [(g.width, g.width_from) for g in glyphs] == [
+        (600, "widths"),
+        (250, "widths"),
+        (500, "default-width"),
+    ]
+    assert [round(g.origin[0], 6) for g in glyphs] == [0, 6, 8.5]
+    assert glyphs[0].height_from == "ascent"
+
+
+def test_default_width_is_1000_without_dw():
+    pdf = _type0_pdf(b"BT /F1 10 Tf <00050006> Tj ET", pikepdf.Name("/Identity-H"))
+    glyphs = trace_page(pdf.pages[0])
+    assert [(g.width, round(g.origin[0], 6)) for g in glyphs] == [(1000, 0), (1000, 10)]
+
+
+MIXED_CMAP = b"""%!PS-Adobe-3.0 Resource-CMap
+/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (Test) /Supplement 0 >> def
+/CMapName /Test-Mixed def
+/CMapType 1 def
+2 begincodespacerange
+<00> <80>
+<8140> <9FFC>
+endcodespacerange
+1 begincidrange
+<20> <7e> 1
+endcidrange
+1 begincidchar
+<8140> 633
+endcidchar
+1 beginnotdefrange
+<8141> <81ff> 2
+endnotdefrange
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end
+"""
+
+
+def test_embedded_cmap_with_one_and_two_byte_codes():
+    # A (1 byte), 0x8140 (2 bytes, cidchar), space (1 byte, gets Tw),
+    # 0x8141 (2 bytes, notdef range), 0xA0 (no codespace: 1 byte, CID 0).
+    content = b"BT /F1 10 Tf 3 Tw <41 8140 20 8141 A0> Tj ET"
+    pdf = _type0_pdf(content, MIXED_CMAP, w=[34, [500], 633, [1000], 1, [250]], dw=700)
+    glyphs = trace_page(pdf.pages[0])
+    assert [(g.offset, g.length, g.code, g.cid) for g in glyphs] == [
+        (0, 1, 0x41, 34),
+        (1, 2, 0x8140, 633),
+        (3, 1, 0x20, 1),
+        (4, 2, 0x8141, 2),
+        (6, 1, 0xA0, 0),
+    ]
+    assert [round(g.origin[0], 6) for g in glyphs] == [0, 5, 15, 20.5, 27.5]
+
+
+def test_embedded_cmap_based_on_identity_h():
+    cmap = b"/Identity-H usecmap 1 begincidchar <0041> 7 endcidchar"
+    pdf = _type0_pdf(b"BT /F1 10 Tf <00410042> Tj ET", cmap, w=[7, [300]], dw=600)
+    glyphs = trace_page(pdf.pages[0])
+    assert [(g.cid, g.width) for g in glyphs] == [(7, 300), (0x42, 600)]
+
+
+@pytest.mark.parametrize(
+    ("encoding", "message"),
+    [
+        (pikepdf.Name("/Identity-V"), "vertical writing"),
+        (b"/WMode 1 def 1 begincodespacerange <00> <ff> endcodespacerange", "vertical"),
+        (pikepdf.Name("/UniJIS-UCS2-H"), "not built in"),
+        (b"/UniGB-UCS2-H usecmap", "not built in"),
+        (b"1 begincidrange <00> <ff> 0 endcidrange", "without codespace"),
+    ],
+)
+def test_composite_fonts_that_cannot_be_placed(encoding, message):
+    pdf = _type0_pdf(b"BT /F1 10 Tf <0001> Tj ET", encoding)
+    with pytest.raises(UnsupportedText, match=message):
+        trace_page(pdf.pages[0])
+
+
+def test_identity_h_matches_pdfium():
+    content = (
+        b"q 0.9 0.2 -0.2 0.9 50 60 cm BT /F1 14 Tf 1 Tc 120 Tz 100 400 Td "
+        b"[<002B0048> -250 <004F004F0052>] TJ ET Q"
+    )
+    pdf = _type0_pdf(content, pikepdf.Name("/Identity-H"), w=[43, [722], 72, [556], 79, [222, 222]])
+    glyphs = trace_page(pdf.pages[0])
+    origins = _pdfium_origins(pdf)
+    assert len(origins) == len(glyphs) == 5
+    for glyph, origin in zip(glyphs, origins, strict=True):
+        assert _close(glyph.origin, origin, tolerance=0.01)

@@ -308,7 +308,8 @@ exact string bytes, and a replacement can be written back without moving any
 other glyph.
 
 Built (`tracker.py`): page content streams with simple fonts that have
-`/Widths`. Each glyph also records its text render mode (3 is the invisible
+`/Widths`, and composite fonts with horizontal writing whose CMap is
+`/Identity-H` or embedded (codes of 1 to 4 bytes, `/W`, `/DW`). Each glyph also records its text render mode (3 is the invisible
 OCR layer of a scan) and where its width and height came from: `/Widths`,
 `/MissingWidth`, the descriptor's `/Ascent` and `/Descent`, `/FontBBox`, or a
 default. Text that the tracker cannot place raises an error, so that no glyph
@@ -317,13 +318,14 @@ is silently misplaced. Glyph origins match pdfium's character origins within
 
 Planned, in order:
 
-1. Type0 fonts: 2-byte and CMap codes, `/W`, `/DW`, vertical writing.
-2. Built-in metrics for the 14 standard fonts, which older PDFs use without
+1. Built-in metrics for the 14 standard fonts, which older PDFs use without
    `/Widths`.
-3. Form XObjects (with their `/Matrix`) and Type3 fonts (with their
+2. Form XObjects (with their `/Matrix`) and Type3 fonts (with their
    `/FontMatrix`); structure elements from the parent tree.
-4. Words and lines, grouped from the glyphs.
-5. A cross-check of boxes against pypdfium2 (see the open questions).
+3. Words and lines, grouped from the glyphs.
+4. A cross-check of boxes against pypdfium2 (see the open questions).
+5. Vertical writing (`/Identity-V`, `/W2`, `/DW2`) and the predefined CJK
+   CMaps, which need Adobe's CMap resources.
 
 ### 5.3 Fonts
 
