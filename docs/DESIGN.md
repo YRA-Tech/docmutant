@@ -196,8 +196,9 @@ the privacy attestation with the report in front of them.
 
 Each "exact" cell in the table maps to an oracle that runs on every candidate:
 
-- geometry: the output's word boxes equal the source's within a tolerance
-  (pypdfium2 by default); the CTMs of kept units are equal;
+- geometry: the output's word boxes stay within the box tolerance of the
+  source's and keep the minimum gap (see 4.4); the CTMs of kept units are
+  equal;
 - image geometry: width, height, bit depth, colour space and filter are equal;
 - structure: the tag tree has the same shape and the same marked-content IDs;
 - labels (`training`): labels computed from the output equal the updated
@@ -207,7 +208,73 @@ A mutation that breaks a kept signal is undone, as in the reduce mode. The
 manifest records the profile, each kept signal with its oracle result, and each
 changed signal with the mutators that changed it.
 
-### 4.4 Combined uses
+### 4.4 Word and line boxes
+
+Two settings control how far text that a mutator writes may move from the
+source text. They are separate from the profile, and each profile has a
+default.
+
+**Box tolerance** states how far each edge of a word box may move, in points.
+Each edge has two bounds: `out` (away from the centre of the box) and `in`
+(toward it).
+
+| Value | out | in | Use |
+|---|---|---|---|
+| `exact` (default) | 0 | 0 | equal-width swaps; metamorphic pairs |
+| `contain` | 0 | any | replacement text that must stay inside the source boxes |
+| `±d` | d | d | test what a target does when text moves up to d points in any direction |
+
+A bound of 0 allows 0.01 pt for rounding. Edges are measured in the frame of
+the line: along the baseline and across it. On a skewed scan, the
+axis-aligned box of a word is larger than the word, so a tolerance on that box
+would allow more movement than the user set.
+
+A line box is the union of its word boxes. If each word edge moves at most d,
+each line edge also moves at most d, so lines need no tolerance of their own.
+
+The tolerance is a limit, not a target: a mutator can move text less than the
+limit, or not at all. To make text move by a set amount, use a metamorphic
+family with the shift as its variable (see 3.3).
+
+**Minimum gap** states how close two boxes may come after the change. It has
+one value for words in the same line and one for lines on the same page. Each
+value is a distance in points (default 0) or `any`, which turns the check
+off. Word spacing and line spacing are different tests, so a user can set
+one and turn the other off. Words in different lines are not compared: the
+line gap covers them.
+
+- The gap between two boxes is a signed distance. When the boxes are apart,
+  it is the shortest distance between them. When they overlap, it is minus
+  the overlap depth: the shortest move that would separate them. The boxes
+  are compared as drawn, as rotated rectangles, so skew does not change the
+  result.
+- A pair must keep a gap of at least the minimum, or at least its gap in
+  the source if that is smaller. Source files often have boxes that are
+  closer than the minimum, or that overlap (superscripts, tight kerning,
+  text printed over text). Such a pair is allowed, but it may not come any
+  closer.
+- With the default of 0, boxes may touch but not overlap, except where they
+  overlapped in the source.
+- Under `contain`, the gap rule always passes. A box inside its source box
+  is never closer to another box than the source box was. The minimum gap
+  has an effect only when `out` is greater than 0.
+
+The text-position tracker computes the boxes from font metrics (see 5.2). It
+pairs each output word with its source word by the glyphs that replaced it,
+not by matching text, so a changed space cannot pair the wrong words.
+
+| Profile | Box tolerance | Minimum gap |
+|---|---|---|
+| `bug-repro` | not checked, unless the user sets it | not checked, unless the user sets it |
+| `metamorphic` | `exact`, unless box position is the variable | 0 |
+| `training` | `exact`; `contain` and `±d` are allowed because labels are rebuilt from the output | 0 |
+| `privacy` | `exact`; at level 2, at least `±` half the grid step | 0 |
+
+The manifest records both settings with the geometry oracle result: the
+largest edge movement found, the smallest word and line gaps found, and the
+number of pairs that broke the gap rule.
+
+### 4.5 Combined uses
 
 Training data from private documents needs both `training` and `privacy`.
 The privacy rules decide *which* values are personal data. The training rules
@@ -394,7 +461,7 @@ pydantic (MIT). Planned optional: fontTools (MIT), docling (MIT), presidio
 |---|---|---|
 | M1 | Manifest, policy validation, CLI | done |
 | M2 | Reduce mode for rendering bugs, crash/hang oracles, basic evidence | built; first real-document runs in progress |
-| M3 | Text-position tracker; render-difference oracle; geometry and image-geometry preservation oracles | next |
+| M3 | Text-position tracker; render-difference oracle; geometry (with box tolerance and minimum gap settings) and image-geometry preservation oracles | next |
 | M4 | Font glyph availability and metric-compatible substitution | |
 | M5 | Hidden layers; anonymize mode with Docling selection; profiles; privacy normalization levels and fingerprint report; schema 0.2 | |
 | M6 | Fuzz and metamorphic modes; corpus packaging | |
@@ -407,7 +474,8 @@ pydantic (MIT). Planned optional: fontTools (MIT), docling (MIT), presidio
 - Text in images: which OCR to use for evidence and replacement, without making
   the core depend on a model.
 - Tolerances for the render-difference oracle across renderers.
-- The tolerance for "exact" word boxes when the geometry oracle and the
-  user's target use different text engines.
+- How much measurement difference to allow, on top of the box tolerance, when
+  a text engine (pypdfium2 or the user's target) reports the word boxes
+  instead of the tracker.
 - How to model text-in-scan replacement so that OCR training data keeps the
   noise and skew statistics of the original scan.
