@@ -144,7 +144,7 @@ profile, and only at the level that the user asks for.
 
 | Signal | `bug-repro` | `metamorphic` | `training` | `privacy` |
 |---|---|---|---|---|
-| Geometry | exact where the oracle needs it; the rest is removed | exact, except the one variable under test | exact | exact by default; rounding is an opt-in level |
+| Geometry | exact where the oracle needs it; the rest is removed | exact, except the one variable under test | exact, except words moved inside a held line (see 4.4) | as `training`; rounding is an opt-in level |
 | Text | equal-width swap | changed only as the family says | changed; labels updated with it | personal data replaced |
 | Glyph shapes | removed unless the oracle needs them | exact | exact, or a metric-compatible substitute | substitute |
 | Image samples | flat grey or noise | exact | exact, or a content-aware replacement | replaced by image class |
@@ -170,6 +170,8 @@ keeps every label correct, or when it updates the label at the same time
 
 - An equal-width text swap keeps word boxes. The transcription label is
   rebuilt from the new codes through `/ToUnicode`.
+- A replacement that moves words inside a held line (see 4.4) changes word
+  boxes, so the word-box labels are rebuilt from the output as well.
 - Flat or noise image replacement is refused for an image that contains text
   or that a label refers to: it removes what the label describes. Such images
   stay exact, or get the planned text-in-scan replacement. That replacement
@@ -196,9 +198,9 @@ the privacy attestation with the report in front of them.
 
 Each "exact" cell in the table maps to an oracle that runs on every candidate:
 
-- geometry: the output's word boxes stay within the box tolerance of the
-  source's and keep the minimum gap (see 4.4); the CTMs of kept units are
-  equal;
+- geometry: the output's word or line boxes, by the scope, stay within the box
+  tolerance of the source's and keep the minimum gap (see 4.4); the CTMs of kept
+  units are equal;
 - image geometry: width, height, bit depth, colour space and filter are equal;
 - structure: the tag tree has the same shape and the same marked-content IDs;
 - labels (`training`): labels computed from the output equal the updated
@@ -210,38 +212,79 @@ changed signal with the mutators that changed it.
 
 ### 4.4 Word and line boxes
 
-Two settings control how far text that a mutator writes may move from the
-source text. They are separate from the profile, and each profile has a
-default.
+These settings control how far text that a mutator writes may move from the
+source text. They are separate from the profile, and each profile has defaults.
 
-**Box tolerance** states how far each edge of a word box may move, in points.
-Each edge has two bounds: `out` (away from the centre of the box) and `in`
-(toward it).
+| Setting | Values | Default |
+|---|---|---|
+| Scope | `word`, `line` | by profile |
+| Box tolerance | `exact`, `contain`, `±d` | `exact` |
+| Tracking limit | ems per gap between letters | 0 |
+| Word count | `fixed`, `free` | `fixed` |
+| Minimum gap | one value for words, one for lines | words 0.15 em, lines 0 |
+
+**Scope** states which box the tolerance applies to. With `word`, each word box
+stays within the tolerance of its source box. Text must fit word by word, so
+only some replacements are possible. With `line`, only the line box is held. A
+difference in one word can be offset by the next word or by the spaces, so words
+move inside the line.
+
+**Box tolerance** states how far each edge of a box may move, in points. Each
+edge has two bounds: `out` (away from the centre of the box) and `in` (toward
+it).
 
 | Value | out | in | Use |
 |---|---|---|---|
-| `exact` (default) | 0 | 0 | equal-width swaps; metamorphic pairs |
-| `contain` | 0 | any | replacement text that must stay inside the source boxes |
+| `exact` | 0 | 0 | equal-width swaps; metamorphic pairs; a justified line |
+| `contain` | 0 | any | replacement text that must stay inside the source box |
 | `±d` | d | d | test what a target does when text moves up to d points in any direction |
 
 A bound of 0 allows 0.01 pt for rounding. Edges are measured in the frame of
-the line: along the baseline and across it. On a skewed scan, the
-axis-aligned box of a word is larger than the word, so a tolerance on that box
-would allow more movement than the user set.
+the line: along the baseline and across it. On a skewed scan, the axis-aligned
+box of a word is larger than the word, so a tolerance on that box would allow
+more movement than the user set.
 
-A line box is the union of its word boxes. If each word edge moves at most d,
-each line edge also moves at most d, so lines need no tolerance of their own.
+A line box is the union of its word boxes. With scope `word`, if each word edge
+moves at most d, each line edge also moves at most d, so the line box follows
+from the word boxes. With scope `line`, the line box is checked directly.
 
 The tolerance is a limit, not a target: a mutator can move text less than the
 limit, or not at all. To make text move by a set amount, use a metamorphic
 family with the shift as its variable (see 3.3).
 
+**Tracking limit** states how far a mutator may change the gaps between the
+letters of a word. It lets a near-width word fill a box exactly. The word box
+holds, but the glyphs inside it move, so the geometry signal changes from
+"exact glyph origins" to "exact boxes", and the manifest says so. A profile that
+needs exact glyph origins keeps the limit at 0.
+
+**Word count** states whether a line may change its number of words. It applies
+only with scope `line`.
+
+- With `fixed`, each output word is paired with its source word by the glyphs
+  that replaced it, not by matching text, so a changed space cannot pair the
+  wrong words. The oracle reports how far each word moved. A line with one word
+  has no spaces to absorb a difference, so it needs a near-width word and
+  tracking.
+- With `free`, the output words have no source words to pair with. Replacement
+  text is less constrained, and a line with one word can become two. The oracle
+  checks line boxes and the gaps inside the output, and reports the lines whose
+  count changed. The word-level results are absent, not zero.
+
+With either value, each source line maps to one output line, and the output must
+group into the same number of lines. A space that grows past the line gap limit
+of the tracker (2 em) splits the line and fails the check, so spaces need no
+separate maximum.
+
+A mutator absorbs a difference with `TJ` adjustments. `Tw` applies only to the
+single-byte code 32, so it has no effect in a two-byte font.
+
 **Minimum gap** states how close two boxes may come after the change. It has
 one value for words in the same line and one for lines on the same page. Each
-value is a distance in points (default 0) or `any`, which turns the check
-off. Word spacing and line spacing are different tests, so a user can set
-one and turn the other off. Words in different lines are not compared: the
-line gap covers them.
+value is a distance in points or ems, or `any`, which turns the check off. Word
+spacing and line spacing are different tests, so a user can set one and turn
+the other off. Words in different lines are not compared: the line gap covers
+them.
 
 - The gap between two boxes is a signed distance. When the boxes are apart,
   it is the shortest distance between them. When they overlap, it is minus
@@ -252,27 +295,65 @@ line gap covers them.
   the source if that is smaller. Source files often have boxes that are
   closer than the minimum, or that overlap (superscripts, tight kerning,
   text printed over text). Such a pair is allowed, but it may not come any
-  closer.
-- With the default of 0, boxes may touch but not overlap, except where they
-  overlapped in the source.
-- Under `contain`, the gap rule always passes. A box inside its source box
-  is never closer to another box than the source box was. The minimum gap
-  has an effect only when `out` is greater than 0.
+  closer. With `free` word count, words have no source gap, so the minimum
+  applies alone.
+- The word default of 0.15 em is the gap at which the tracker ends a word (see
+  5.2). Words closer than that read as one word. The line default of 0 lets
+  lines touch but not overlap, except where they overlapped in the source.
+- With scope `word` and tolerance `contain`, the gap rule always passes: a box
+  inside its source box is never closer to another box than the source box was.
+  With scope `line`, the word gap always applies, because words move inside the
+  line.
 
-The text-position tracker computes the boxes from font metrics (see 5.2). It
-pairs each output word with its source word by the glyphs that replaced it,
-not by matching text, so a changed space cannot pair the wrong words.
+The text-position tracker computes the boxes from font metrics (see 5.2).
 
-| Profile | Box tolerance | Minimum gap |
-|---|---|---|
-| `bug-repro` | not checked, unless the user sets it | not checked, unless the user sets it |
-| `metamorphic` | `exact`, unless box position is the variable | 0 |
-| `training` | `exact`; `contain` and `±d` are allowed because labels are rebuilt from the output | 0 |
-| `privacy` | `exact`; at level 2, at least `±` half the grid step | 0 |
+| Profile | Scope | Box tolerance | Tracking limit | Word count | Minimum gap |
+|---|---|---|---|---|---|
+| `bug-repro` | not checked, unless the user sets it | | | | |
+| `metamorphic` | `word` | `exact`, unless box position is the variable | 0 | `fixed` | defaults |
+| `training` | `line`; `word` is allowed | `exact`; `contain` and `±d` are allowed because labels are rebuilt from the output | 0.02 em | `fixed`; `free` is allowed | defaults |
+| `privacy` | `line` | `exact`; at level 2, at least `±` half the grid step | 0.02 em | `fixed`; `free` is allowed | defaults |
 
-The manifest records both settings with the geometry oracle result: the
-largest edge movement found, the smallest word and line gaps found, and the
-number of pairs that broke the gap rule.
+`privacy` uses `line` because a replacement of exactly the same width keeps the
+width of each word, which narrows down what the original word could have been.
+
+A line that no replacement can fit is left unchanged and reported, as with any
+mutation that breaks a kept signal (see 4.3). Under `privacy`, a line that holds
+personal data cannot stay: the run stops and names the line, and the user
+loosens the settings or removes the text.
+
+The manifest records every setting with the geometry oracle result: the largest
+edge movement found for lines and, with `fixed` word count, for words; the
+largest tracking used; the smallest word and line gaps found; the number of pairs
+that broke the gap rule; and the number of lines left unchanged or with a changed
+word count.
+
+The defaults come from a measurement on 12 sample documents (at most 5 pages
+each; 3,774 words made only of letters, in one font, with `/ToUnicode`). It asked
+whether each word had a different real word that the page's font could draw and
+that fit the word's box. Fit was not checked for grammar or meaning, so sensible
+text will fit less often.
+
+| Fit | Words with a fit: documents' own 1,384 words | Whole lines | Words with a fit: 63,849-word dictionary | Whole lines |
+|---|---|---|---|---|
+| Exact width | 49% | 27% | 85% | 61% |
+| Tracking up to 0.01 em per gap | 90% | 69% | 97% | 88% |
+| Tracking up to 0.02 em per gap | 95% | 84% | 99% | 96% |
+
+With scope `line`, words within one letter of the source length and the spaces
+absorbing the difference, a random word changes each space by a median of about
+0.2 em and at the 95th percentile by about 0.8 em, which is more than the space
+itself (typically about 0.25 em). Choosing the best of 30 candidates against the
+running difference lowers those figures to 0.002 em and 0.07 em. So `line` needs
+a mutator that chooses words with the line in mind. About 10% of lines have one
+word and no spaces. Whether 0.02 em of tracking is visible has not been checked
+with renders yet.
+
+**Possible later:** segments that span several lines, so that text can reflow
+between lines inside a held region such as a paragraph or a table cell, and
+sensible alternatives to the source text in place of words chosen only by fit.
+Both would use the same settings on a larger box. They are not designed yet, and
+the one-line-to-one-line rule above stays until they are.
 
 ### 4.5 Combined uses
 
@@ -505,7 +586,7 @@ pydantic (MIT). Planned optional: fontTools (MIT), docling (MIT), presidio
 |---|---|---|
 | M1 | Manifest, policy validation, CLI | done |
 | M2 | Reduce mode for rendering bugs, crash/hang oracles, basic evidence | built; first real-document runs in progress |
-| M3 | Text-position tracker; render-difference oracle; geometry (with box tolerance and minimum gap settings) and image-geometry preservation oracles | next |
+| M3 | Text-position tracker; render-difference oracle; geometry (with the settings of 4.4) and image-geometry preservation oracles | next |
 | M4 | Font glyph availability and metric-compatible substitution | |
 | M5 | Hidden layers; anonymize mode with Docling selection; profiles; privacy normalization levels and fingerprint report; schema 0.2 | |
 | M6 | Fuzz and metamorphic modes; corpus packaging | |
@@ -523,5 +604,7 @@ pydantic (MIT). Planned optional: fontTools (MIT), docling (MIT), presidio
   instead of the tracker. A fixed allowance per glyph is not enough: an
   engine that rounds widths (pdfium truncates them) drifts further from the
   tracker with each glyph until the next positioning operator.
+- How much tracking stays invisible. The default of 0.02 em per gap is an
+  estimate; the render-difference oracle should test it.
 - How to model text-in-scan replacement so that OCR training data keeps the
   noise and skew statistics of the original scan.
