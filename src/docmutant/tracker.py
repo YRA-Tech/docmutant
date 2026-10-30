@@ -608,7 +608,7 @@ def trace_page(page: pikepdf.Page) -> list[Glyph]:
     return list(trace(instructions, page.obj.get("/Resources"), StreamRef("page", page.index)))
 
 
-def _extent(glyph: Glyph, direction: Point) -> tuple[float, float, float, float]:
+def extent(glyph: Glyph, direction: Point) -> tuple[float, float, float, float]:
     """Start, end, bottom and top of a glyph's box in the frame of ``direction``."""
     ux, uy = direction
     along = [x * ux + y * uy for x, y in glyph.box]
@@ -617,7 +617,7 @@ def _extent(glyph: Glyph, direction: Point) -> tuple[float, float, float, float]
 
 
 def _word(glyphs: list[Glyph], direction: Point) -> Word:
-    extents = [_extent(glyph, direction) for glyph in glyphs]
+    extents = [extent(glyph, direction) for glyph in glyphs]
     return Word(
         tuple(glyphs),
         Box(
@@ -650,8 +650,8 @@ def _breaks_line(previous: Glyph, glyph: Glyph, gap: float) -> bool:
         return True
     if (previous.render_mode in INVISIBLE) != (glyph.render_mode in INVISIBLE):
         return True
-    _, _, bottom, top = _extent(glyph, previous.direction)
-    _, _, last_bottom, last_top = _extent(previous, previous.direction)
+    _, _, bottom, top = extent(glyph, previous.direction)
+    _, _, last_bottom, last_top = extent(previous, previous.direction)
     shared = min(top, last_top) - max(bottom, last_bottom)
     if shared < LINE_OVERLAP * min(top - bottom, last_top - last_bottom):
         return True
@@ -690,7 +690,7 @@ def group_lines(glyphs: Iterable[Glyph]) -> list[Line]:
 
     for glyph in glyphs:
         if previous is not None:
-            gap = _extent(glyph, previous.direction)[0] - _extent(previous, previous.direction)[1]
+            gap = extent(glyph, previous.direction)[0] - extent(previous, previous.direction)[1]
             if _breaks_line(previous, glyph, gap):
                 end_line()
             elif gap > WORD_GAP * max(glyph.em, previous.em):

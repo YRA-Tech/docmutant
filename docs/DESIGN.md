@@ -261,11 +261,12 @@ needs exact glyph origins keeps the limit at 0.
 **Word count** states whether a line may change its number of words. It applies
 only with scope `line`.
 
-- With `fixed`, each output word is paired with its source word by the glyphs
-  that replaced it, not by matching text, so a changed space cannot pair the
-  wrong words. The oracle reports how far each word moved. A line with one word
-  has no spaces to absorb a difference, so it needs a near-width word and
-  tracking.
+- With `fixed`, each output word is paired with the source word at the same
+  place in drawing order, not by matching text. A mutator does not reorder text,
+  and a changed count fails the check, so a changed space cannot pair the wrong
+  words without being reported. The oracle reports how far each word moved. A
+  line with one word has no spaces to absorb a difference, so it needs a
+  near-width word and tracking.
 - With `free`, the output words have no source words to pair with. Replacement
   text is less constrained, and a line with one word can become two. The oracle
   checks line boxes and the gaps inside the output, and reports the lines whose
@@ -295,8 +296,9 @@ them.
   the source if that is smaller. Source files often have boxes that are
   closer than the minimum, or that overlap (superscripts, tight kerning,
   text printed over text). Such a pair is allowed, but it may not come any
-  closer. With `free` word count, words have no source gap, so the minimum
-  applies alone.
+  closer. With `free` word count, words have no source gap to compare, so the
+  closest two words of the source line take its place. An unchanged line
+  therefore passes under every setting.
 - The word default of 0.15 em is the gap at which the tracker ends a word (see
   5.2). Words closer than that read as one word. The line default of 0 lets
   lines touch but not overlap, except where they overlapped in the source.
@@ -502,6 +504,7 @@ region and every text region that stayed, with the detector's confidence.
 | Oracle | Status |
 |---|---|
 | crash (signal), hang (timeout), error (nonzero exit) | built |
+| geometry: the word and line box settings of 4.4 (`geometry.py`); not yet run by a mode | built |
 | render difference against a second engine (pypdfium2 by default), with per-page `mean_abs_error` and `changed_pixels_ratio` | planned |
 | text-cell difference between two runs or two engines | planned |
 | invariant check for metamorphic families | planned |
