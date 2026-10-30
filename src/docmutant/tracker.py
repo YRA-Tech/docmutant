@@ -14,13 +14,18 @@ followed with their ``/Matrix``. Standard fonts that rely on built-in metrics
 instead of ``/Widths``, vertical writing and predefined CMaps other than
 Identity raise ``UnsupportedText``: without their metrics, every later glyph in
 the text object would be misplaced.
+
+``group_lines`` groups the glyphs into words and lines, in drawing order. Each box
+is a rectangle in the frame of its line, so an edge can be measured along or across
+the baseline on skewed text.
 """
 
 from __future__ import annotations
 
+import math
 import re
-from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 import pikepdf
@@ -35,6 +40,26 @@ HeightSource = Literal["ascent", "font-bbox", "default"]
 DEFAULT_ASCENT = 750.0
 DEFAULT_DESCENT = -250.0
 """Glyph-space extent used when the font gives neither ``/Ascent`` nor ``/FontBBox``."""
+
+
+WORD_GAP = 0.15
+"""A gap in ems that ends a word: above kerning (about 0.1), below tight word spaces."""
+
+LINE_GAP = 2.0
+"""A gap in ems that ends a line: wider than a word space, so table cells and columns part."""
+
+LINE_BACK = 1.0
+"""A jump back in ems that ends a line: an accent or fake bold moves back less."""
+
+LINE_OVERLAP = 0.5
+"""Share of the shorter glyph's height that must overlap: a superscript does, the next
+line does not."""
+
+SAME_DIRECTION = 0.02
+"""Sine of the largest angle between two glyphs of a line, about 1 degree."""
+
+INVISIBLE = frozenset({3, 7})
+"""Text render modes that paint nothing: invisible, and clip only."""
 
 
 class UnsupportedText(Exception):
@@ -93,6 +118,73 @@ class Glyph:
 
     height_from: HeightSource
 
+    text: str | None
+    """Unicode text of the glyph: from ``/ToUnicode``, and for the space of a simple
+    font from its encoding. None when the font does not say."""
+
+    direction: Point
+    """Unit vector along the baseline, in default user space."""
+
+    em: float
+    """Length of one font size across the baseline, in default user space."""
+
+    @property
+    def is_space(self) -> bool:
+        return self.text is not None and self.text.isspace()
+
+
+@dataclass(frozen=True)
+class Box:
+    """A rectangle in the frame of a line, in points along and across the baseline.
+
+    ``start`` and ``end`` are positions along ``direction``, ``bottom`` and ``top``
+    along that direction turned 90 degrees counterclockwise.
+    """
+
+    direction: Point
+    start: float
+    end: float
+    bottom: float
+    top: float
+
+    @property
+    def corners(self) -> tuple[Point, Point, Point, Point]:
+        """Corners in default user space: bottom left, bottom right, top right, top left."""
+        ux, uy = self.direction
+        return tuple(
+            (along * ux - across * uy, along * uy + across * ux)
+            for along, across in (
+                (self.start, self.bottom),
+                (self.end, self.bottom),
+                (self.end, self.top),
+                (self.start, self.top),
+            )
+        )
+
+
+@dataclass(frozen=True)
+class Word:
+    """Glyphs between two spaces or gaps; the spaces belong to no word."""
+
+    glyphs: tuple[Glyph, ...]
+    box: Box
+
+    @property
+    def text(self) -> str:
+        return "".join(glyph.text or "" for glyph in self.glyphs)
+
+
+@dataclass(frozen=True)
+class Line:
+    """Words drawn one after the other on one baseline; the box is their union."""
+
+    words: tuple[Word, ...]
+    box: Box
+
+    @property
+    def text(self) -> str:
+        return " ".join(word.text for word in self.words)
+
 
 @dataclass(frozen=True)
 class _CMap:
@@ -139,7 +231,7 @@ class _CMap:
 IDENTITY_H = _CMap(codespaces=((b"\x00\x00", b"\xff\xff"),), ranges=((2, 0, 0xFFFF, 0),))
 
 _CMAP_TOKEN = re.compile(
-    rb"%[^\r\n]*|\([^)]*\)|<[0-9A-Fa-f\s]*>|/[^\s/<>\[\]()%]+|[^\s/<>\[\]()%]+"
+    rb"%[^\r\n]*|\([^)]*\)|<[0-9A-Fa-f\s]*>|\[|\]|/[^\s/<>\[\]()%]+|[^\s/<>\[\]()%]+"
 )
 _CMAP_SECTIONS = frozenset(
     {b"begincodespacerange", b"begincidrange", b"begincidchar", b"beginnotdefrange"}
@@ -196,6 +288,84 @@ def _embedded_cmap(name: str, stream: pikepdf.Stream) -> _CMap:
     return _CMap(tuple(codespaces), tuple(ranges), tuple(notdefs))
 
 
+def _hex_bytes(token: bytes) -> bytes:
+    digits = b"".join(token[1:-1].split())
+    return bytes.fromhex((digits + b"0" * (len(digits) % 2)).decode())
+
+
+def _to_unicode(stream: pikepdf.Object | None) -> dict[int, str]:
+    """Code to text, from the ``bfchar`` and ``bfrange`` sections of a ``/ToUnicode`` CMap.
+
+    A damaged CMap gives what was read before the damage: the text decides only where
+    words end, so it is no reason to refuse a page whose positions are known.
+    """
+    if not isinstance(stream, pikepdf.Stream):
+        return {}
+    try:
+        tokens = [t for t in _CMAP_TOKEN.findall(stream.read_bytes()) if not t.startswith(b"%")]
+    except pikepdf.PdfError:
+        return {}
+
+    def code(token: bytes) -> int:
+        return int.from_bytes(_hex_bytes(token), "big")
+
+    def text(target: bytes) -> str:
+        return target.decode("utf-16-be", "replace")
+
+    mapping: dict[int, str] = {}
+    section: bytes | None = None
+    operands: list[bytes] = []
+    try:
+        for token in tokens:
+            if token in (b"beginbfchar", b"beginbfrange"):
+                section, operands = token, []
+            elif token in (b"endbfchar", b"endbfrange"):
+                section = None
+            elif section is not None:
+                operands.append(token)
+                if section == b"beginbfchar" and len(operands) == 2:
+                    mapping[code(operands[0])] = text(_hex_bytes(operands[1]))
+                    operands = []
+                elif section == b"beginbfrange" and len(operands) >= 3:
+                    first, last = code(operands[0]), code(operands[1])
+                    last = min(last, first + 65535)
+                    if operands[2] != b"[":
+                        # One target: its value counts up with the code.
+                        target = _hex_bytes(operands[2])
+                        base, size = int.from_bytes(target, "big"), len(target)
+                        for value in range(first, last + 1):
+                            shifted = (base + value - first) % (1 << (8 * size))
+                            mapping[value] = text(shifted.to_bytes(size, "big"))
+                        operands = []
+                    elif token == b"]":
+                        targets = operands[3:-1]
+                        for value, item in zip(range(first, last + 1), targets, strict=False):
+                            mapping[value] = text(_hex_bytes(item))
+                        operands = []
+    except ValueError:
+        pass
+    # U+0000 is what some producers write for a glyph they could not name.
+    return {value: item for value, item in mapping.items() if item != "\x00"}
+
+
+def _simple_spaces(encoding: pikepdf.Object | None) -> dict[int, str]:
+    """Codes that a simple font's encoding names as spaces: 32 unless ``/Differences`` moves it."""
+    spaces = {32: " "}
+    if not isinstance(encoding, pikepdf.Dictionary):
+        return spaces
+    code = 0
+    for item in encoding.get("/Differences", []):
+        if isinstance(item, pikepdf.Name):
+            if item in ("/space", "/nbspace"):
+                spaces[code] = " "
+            else:
+                spaces.pop(code, None)
+            code += 1
+        else:
+            code = int(item)
+    return spaces
+
+
 @dataclass(frozen=True)
 class _Font:
     widths: Mapping[int, float]
@@ -211,6 +381,9 @@ class _Font:
 
     matrix: pikepdf.Matrix = pikepdf.Matrix(0.001, 0, 0, 0.001, 0, 0)
     """Glyph space to text space: the ``/FontMatrix`` of a Type3 font."""
+
+    text: Mapping[int, str] = field(default_factory=dict)
+    """Keyed by code."""
 
     def codes(self, data: bytes) -> Iterator[tuple[int, int, int, int | None]]:
         """Yield offset, length, code and CID for each code in ``data``."""
@@ -261,8 +434,11 @@ def _font(name: str, font: pikepdf.Object) -> _Font:
         missing_width = float(descriptor.MissingWidth)
     first = int(font.get("/FirstChar", 0))
     widths = {first + i: float(w) for i, w in enumerate(font.Widths)}
+    text = {**_simple_spaces(font.get("/Encoding")), **_to_unicode(font.get("/ToUnicode"))}
     if subtype != "/Type3":
-        return _Font(widths, missing_width, "missing-width", *_vertical_extent(descriptor))
+        return _Font(
+            widths, missing_width, "missing-width", *_vertical_extent(descriptor), text=text
+        )
 
     matrix = pikepdf.Matrix(*map(float, font.get("/FontMatrix", [0.001, 0, 0, 0.001, 0, 0])))
     if matrix.a == 0 or matrix.d == 0:
@@ -275,6 +451,7 @@ def _font(name: str, font: pikepdf.Object) -> _Font:
         "missing-width",
         *_vertical_extent(descriptor, font.get("/FontBBox"), default),
         matrix=matrix,
+        text=text,
     )
 
 
@@ -298,6 +475,7 @@ def _composite_font(name: str, font: pikepdf.Object) -> _Font:
         "default-width",
         *_vertical_extent(descendant.get("/FontDescriptor")),
         cmap=cmap,
+        text=_to_unicode(font.get("/ToUnicode")),
     )
 
 
@@ -317,6 +495,11 @@ class _State:
     """The font that ``Tf`` selected: a form inherits the font, not its resource name."""
 
     size: float = 0.0
+
+
+def _unit(x: float, y: float) -> Point:
+    length = math.hypot(x, y)
+    return (x / length, y / length) if length else (1.0, 0.0)
 
 
 def trace(
@@ -385,7 +568,8 @@ def trace(
             text_space = pikepdf.Matrix(state.size * state.scale, 0, 0, state.size, 0, state.rise)
             for offset, length, code, cid in metrics.codes(bytes(string)):
                 width, width_from = metrics.width(code if cid is None else cid)
-                to_page = metrics.matrix @ text_space @ text_matrix @ state.ctm
+                scaled = text_space @ text_matrix @ state.ctm
+                to_page = metrics.matrix @ scaled
                 corners = (
                     (0.0, metrics.descent),
                     (width, metrics.descent),
@@ -409,6 +593,9 @@ def trace(
                     mcid=mcid,
                     width_from=width_from,
                     height_from=metrics.height_from,
+                    text=metrics.text.get(code),
+                    direction=_unit(to_page.a, to_page.b),
+                    em=math.hypot(scaled.c, scaled.d),
                 )
                 advance = width * metrics.matrix.a * state.size + state.char_spacing
                 if code == 32 and length == 1:
@@ -494,3 +681,99 @@ def trace_page(page: pikepdf.Page) -> list[Glyph]:
     """All glyphs that the page draws, including those in its form XObjects."""
     instructions = list(pikepdf.parse_content_stream(page))
     return list(trace(instructions, page.obj.get("/Resources"), StreamRef("page", page.index)))
+
+
+def _extent(glyph: Glyph, direction: Point) -> tuple[float, float, float, float]:
+    """Start, end, bottom and top of a glyph's box in the frame of ``direction``."""
+    ux, uy = direction
+    along = [x * ux + y * uy for x, y in glyph.box]
+    across = [y * ux - x * uy for x, y in glyph.box]
+    return min(along), max(along), min(across), max(across)
+
+
+def _word(glyphs: list[Glyph], direction: Point) -> Word:
+    extents = [_extent(glyph, direction) for glyph in glyphs]
+    return Word(
+        tuple(glyphs),
+        Box(
+            direction,
+            min(e[0] for e in extents),
+            max(e[1] for e in extents),
+            min(e[2] for e in extents),
+            max(e[3] for e in extents),
+        ),
+    )
+
+
+def _line(words: list[Word]) -> Line:
+    boxes = [word.box for word in words]
+    return Line(
+        tuple(words),
+        Box(
+            boxes[0].direction,
+            min(b.start for b in boxes),
+            max(b.end for b in boxes),
+            min(b.bottom for b in boxes),
+            max(b.top for b in boxes),
+        ),
+    )
+
+
+def _breaks_line(previous: Glyph, glyph: Glyph, gap: float) -> bool:
+    (px, py), (gx, gy) = previous.direction, glyph.direction
+    if abs(px * gy - py * gx) > SAME_DIRECTION or px * gx + py * gy < 0:
+        return True
+    if (previous.render_mode in INVISIBLE) != (glyph.render_mode in INVISIBLE):
+        return True
+    _, _, bottom, top = _extent(glyph, previous.direction)
+    _, _, last_bottom, last_top = _extent(previous, previous.direction)
+    shared = min(top, last_top) - max(bottom, last_bottom)
+    if shared < LINE_OVERLAP * min(top - bottom, last_top - last_bottom):
+        return True
+    em = max(glyph.em, previous.em)
+    return gap > LINE_GAP * em or gap < -LINE_BACK * em
+
+
+def group_lines(glyphs: Iterable[Glyph]) -> list[Line]:
+    """Group glyphs into words and lines, in drawing order.
+
+    Each glyph is compared with the one drawn before it. It starts a new line when
+    it turns away from the baseline, shares less than ``LINE_OVERLAP`` of its height
+    with the previous glyph, jumps back more than ``LINE_BACK`` or forward more than
+    ``LINE_GAP``, or changes between visible and invisible. Inside a line, a space or
+    a gap of more than ``WORD_GAP`` ends the word. Limits are in ems of the larger
+    glyph. Glyphs that are not drawn in reading order make separate lines.
+    """
+    lines: list[Line] = []
+    words: list[Word] = []
+    word: list[Glyph] = []
+    previous: Glyph | None = None
+
+    def end_word() -> None:
+        nonlocal word
+        if word:
+            direction = words[0].box.direction if words else word[0].direction
+            words.append(_word(word, direction))
+            word = []
+
+    def end_line() -> None:
+        nonlocal words
+        end_word()
+        if words:
+            lines.append(_line(words))
+            words = []
+
+    for glyph in glyphs:
+        if previous is not None:
+            gap = _extent(glyph, previous.direction)[0] - _extent(previous, previous.direction)[1]
+            if _breaks_line(previous, glyph, gap):
+                end_line()
+            elif gap > WORD_GAP * max(glyph.em, previous.em):
+                end_word()
+        if glyph.is_space:
+            end_word()
+        else:
+            word.append(glyph)
+        previous = glyph
+    end_line()
+    return lines

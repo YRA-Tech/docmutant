@@ -11,7 +11,14 @@ import pypdfium2.raw as pdfium_c
 import pytest
 
 from docmutant.mutate import read_stream
-from docmutant.tracker import DEFAULT_ASCENT, DEFAULT_DESCENT, UnsupportedText, trace_page
+from docmutant.tracker import (
+    DEFAULT_ASCENT,
+    DEFAULT_DESCENT,
+    UnsupportedText,
+    _to_unicode,
+    group_lines,
+    trace_page,
+)
 
 HELVETICA_WIDTHS = {ord("H"): 722, ord("e"): 556, ord("l"): 222, ord("o"): 556, 32: 278}
 
@@ -510,3 +517,172 @@ def test_type3_matches_pdfium():
     assert len(origins) == len(glyphs) == 4
     for glyph, origin in zip(glyphs, origins, strict=True):
         assert _close(glyph.origin, origin, tolerance=0.01)
+
+
+def _words(pdf: pikepdf.Pdf) -> list[list[int]]:
+    """For each line, the number of glyphs in each word."""
+    return [[len(w.glyphs) for w in line.words] for line in group_lines(trace_page(pdf.pages[0]))]
+
+
+def test_a_space_glyph_ends_a_word_and_belongs_to_none():
+    pdf = _pdf(b"BT /F1 10 Tf 72 700 Td (AB  A) Tj ET")
+    (line,) = group_lines(trace_page(pdf.pages[0]))
+    first, second = line.words
+    assert [g.code for g in first.glyphs] == [65, 66]
+    assert [g.code for g in second.glyphs] == [65]
+    # A and B are 5 wide and two spaces 2.5 wide: the second word starts at 72 + 10 + 5.
+    assert _close((first.box.start, first.box.end), (72, 82))
+    assert _close((second.box.start, second.box.end), (87, 92))
+    assert _close((line.box.start, line.box.end), (72, 92))
+    assert _close((line.box.bottom, line.box.top), (697.5, 707.5))
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        # 100 in TJ is 0.1 em: kerning.
+        (b"BT /F1 10 Tf [(A) -100 (B)] TJ ET", [[2]]),
+        # 300 in TJ is 0.3 em: a word space written as a shift.
+        (b"BT /F1 10 Tf [(A) -300 (B)] TJ ET", [[1, 1]]),
+        # 3000 in TJ is 3 em: another cell of the table.
+        (b"BT /F1 10 Tf [(A) -3000 (B)] TJ ET", [[1], [1]]),
+        # The same shift with the size in the text matrix.
+        (b"BT /F1 1 Tf 10 0 0 10 0 0 Tm [(A) -300 (B)] TJ ET", [[1, 1]]),
+        # A gap wider than the limit, across a space glyph.
+        (b"BT /F1 10 Tf (A ) Tj 30 0 Td (B) Tj ET", [[1], [1]]),
+        # The next line.
+        (b"BT /F1 10 Tf (A) Tj 0 -12 Td (B) Tj ET", [[1], [1]]),
+        # The second pass of fake bold, drawn back over the first.
+        (b"BT /F1 10 Tf (ABABA) Tj 0.2 0 Td (ABABA) Tj ET", [[5], [5]]),
+        # A small shift back: an accent over its letter.
+        (b"BT /F1 10 Tf (A) Tj -5 0 Td (B) Tj ET", [[2]]),
+        # A superscript and the return to the baseline.
+        (b"BT /F1 10 Tf (A) Tj /F1 7 Tf 4 Ts (B) Tj /F1 10 Tf 0 Ts (A) Tj ET", [[3]]),
+        # Invisible text over the same place.
+        (b"BT /F1 10 Tf (A) Tj 3 Tr 5 0 Td (B) Tj ET", [[1], [1]]),
+        # Only spaces: no word and no line.
+        (b"BT /F1 10 Tf (  ) Tj ET", []),
+    ],
+)
+def test_word_and_line_breaks(content, expected):
+    assert _words(_pdf(content)) == expected
+
+
+def test_a_drop_cap_does_not_swallow_the_next_line():
+    # Each glyph is compared with the last one, so the tall D does not reach the next line.
+    pdf = _pdf(b"BT /F1 40 Tf (A) Tj /F1 10 Tf (AB) Tj 20 -12 Td (AB) Tj ET")
+    assert _words(pdf) == [[3], [2]]
+
+
+def test_box_is_in_the_frame_of_the_line_on_skewed_text():
+    # Rotated by 3-4-5: the baseline runs along (0.8, 0.6).
+    pdf = _pdf(b"q 0.8 0.6 -0.6 0.8 100 200 cm BT /F1 10 Tf (AB) Tj ET Q")
+    glyphs = trace_page(pdf.pages[0])
+    (line,) = group_lines(glyphs)
+    box = line.box
+    assert _close(box.direction, (0.8, 0.6))
+    assert _close((box.end - box.start, box.top - box.bottom), (10, 10))
+    # The corners are the glyph corners: an axis-aligned box would be larger.
+    assert _close(box.corners[0], glyphs[0].box[0])
+    assert _close(box.corners[1], glyphs[1].box[1])
+    assert _close(box.corners[2], glyphs[1].box[2])
+    assert _close(box.corners[3], glyphs[0].box[3])
+
+
+def test_a_turn_starts_a_new_line():
+    # 90 degrees after the first glyph, at a place that overlaps it.
+    pdf = _pdf(b"BT /F1 10 Tf (A) Tj 0 1 -1 0 7 0 Tm (B) Tj ET")
+    assert _words(pdf) == [[1], [1]]
+
+
+def test_a_mirrored_line_reads_along_its_own_direction():
+    pdf = _pdf(b"BT /F1 10 Tf -1 0 0 1 100 0 Tm (AB) Tj ET")
+    (line,) = group_lines(trace_page(pdf.pages[0]))
+    assert _close(line.box.direction, (-1, 0))
+    assert line.box.end - line.box.start == pytest.approx(10)
+    assert line.words[0].glyphs[0].origin == pytest.approx((100, 0))
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (b"1 beginbfchar <0003> <0020> endbfchar", {3: " "}),
+        (b"1 beginbfrange <0041> <0043> <0061> endbfrange", {65: "a", 66: "b", 67: "c"}),
+        (
+            b"1 beginbfrange <0041> <0042> [<0078> <00660069>] endbfrange",
+            {65: "x", 66: "fi"},
+        ),
+        # A range whose array is shorter than the range names only what it has.
+        (b"1 beginbfrange <0041> <0043> [<0078>] endbfrange", {65: "x"}),
+        (b"1 beginbfrange <41> <41> <0041> <42> <42> <0042> endbfrange", {65: "A", 66: "B"}),
+        # The count wraps inside the target instead of overflowing it, and U+0000 is dropped.
+        (b"1 beginbfrange <0000> <0001> <FFFF> endbfrange", {0: "\uffff"}),
+        # U+0000 names nothing.
+        (b"1 beginbfchar <0003> <0000> endbfchar", {}),
+        # A comment, odd hex digits and hex split by a line break.
+        (b"%x\n1 beginbfchar <41> <00\n4> endbfchar", {65: "@"}),
+        # What comes before the damage is kept.
+        (b"2 beginbfchar <41> <0041> nonsense <0042> endbfchar", {65: "A"}),
+    ],
+)
+def test_to_unicode(body, expected):
+    pdf = pikepdf.Pdf.new()
+    assert _to_unicode(pdf.make_stream(body)) == expected
+
+
+def _type0_with_to_unicode(content: bytes, to_unicode: bytes | None) -> pikepdf.Pdf:
+    pdf = _type0_pdf(content, pikepdf.Name("/Identity-H"), None, 500)
+    if to_unicode is not None:
+        font = pdf.pages[0].Resources.Font.F1
+        font.ToUnicode = pdf.make_stream(to_unicode)
+    return pdf
+
+
+def test_a_composite_font_names_its_spaces_in_to_unicode():
+    # CID 3 is the usual space of a subset TrueType font; here also U+00A0 at CID 4.
+    to_unicode = b"1 beginbfrange <0001> <0002> <0041> endbfrange 2 beginbfchar "
+    to_unicode += b"<0003> <0020> <0004> <00A0> endbfchar"
+    pdf = _type0_with_to_unicode(
+        b"BT /F1 10 Tf <00010002000300010004000200030003> Tj ET", to_unicode
+    )
+    (line,) = group_lines(trace_page(pdf.pages[0]))
+    assert [word.text for word in line.words] == ["AB", "A", "B"]
+    assert line.text == "AB A B"
+
+
+def test_without_to_unicode_a_composite_font_has_no_known_spaces():
+    pdf = _type0_with_to_unicode(b"BT /F1 10 Tf <000100030002> Tj ET", None)
+    (line,) = group_lines(trace_page(pdf.pages[0]))
+    assert [len(word.glyphs) for word in line.words] == [3]
+    assert line.words[0].glyphs[0].text is None
+
+
+def test_a_simple_font_names_its_spaces_in_the_encoding():
+    # Differences makes code 1 the space and takes code 32 for a letter.
+    pdf = _pdf(b"BT /F1 10 Tf (A\001A A) Tj ET", {1: 250, 32: 500, 65: 500})
+    pdf.pages[0].Resources.Font.F1.Encoding = pikepdf.Dictionary(
+        Differences=[1, pikepdf.Name("/space"), 32, pikepdf.Name("/A")]
+    )
+    assert _words(pdf) == [[1, 3]]
+
+
+def test_to_unicode_comes_before_the_encoding():
+    pdf = _pdf(b"BT /F1 10 Tf (A A) Tj ET")
+    pdf.pages[0].Resources.Font.F1.ToUnicode = pdf.make_stream(
+        b"1 beginbfchar <20> <0041> endbfchar"
+    )
+    assert _words(pdf) == [[3]]
+
+
+def test_words_and_lines_match_pdfium():
+    content = (
+        b"BT /F1 12 Tf 72 700 Td (Hello world) Tj 0 -14 Td [(Hello) -400 (world)] TJ "
+        b"0 -14 Td (Hell) Tj (o) Tj ( ) Tj (Hello) Tj ET"
+    )
+    pdf = _pdf(content, {**HELVETICA_WIDTHS, ord("w"): 722, ord("r"): 333, ord("d"): 556})
+    lines = group_lines(trace_page(pdf.pages[0]))
+    buffer = io.BytesIO()
+    pdf.save(buffer)
+    text = pdfium.PdfDocument(buffer.getvalue())[0].get_textpage().get_text_range()
+    assert [len(w.glyphs) for line in lines for w in line.words] == [len(w) for w in text.split()]
+    assert len(lines) == len(text.splitlines())

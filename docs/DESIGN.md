@@ -322,14 +322,33 @@ out and one known difference: pdfium truncates fractional widths to whole glyph
 units, so its origins fall behind the tracker's along a string (0.14 pt after
 about 40 glyphs at 12 pt).
 
+Also built: `group_lines` groups the glyphs into words and lines, in drawing
+order, so that text printed over text and table cells stay apart. Each glyph is
+compared with the one before it. A new line starts when the glyph turns away
+from the baseline, shares less than half its height with the previous glyph,
+jumps back more than 1 em or forward more than 2 em, or changes between visible
+and invisible. Inside a line, a space or a gap of more than 0.15 em ends a word.
+Spaces come from `/ToUnicode` (`bfchar` and `bfrange`) and, in a simple font,
+from the encoding. Each box is a rectangle in the frame of its line, as 4.4
+requires, and a line box is the union of its word boxes.
+
+On the sample documents, 99% of the words match pdfium's exactly. In the rest,
+pdfium joins words hyphenated across lines, expands ligatures or leaves out a
+space, or the font's `/ToUnicode` maps a hyphen to U+0000. The sample has no gaps between 0.05 and 0.3 em, so it
+confirms the word gap of 0.15 em but does not pin it down; that value comes from
+typography (kerning stays under about 0.1 em, word spaces rarely fall under
+0.18 em). Known limits: a font with no `/ToUnicode` and a space at an unknown
+code runs words together, letter spacing (`Tc`) above 0.15 em splits a word into
+single glyphs, and glyphs not drawn in reading order, such as logically ordered
+right-to-left text, make separate lines.
+
 Planned, in order:
 
-1. Words and lines, grouped from the glyphs.
-2. Built-in metrics for the 14 standard fonts, which older PDFs use without
+1. Built-in metrics for the 14 standard fonts, which older PDFs use without
    `/Widths`.
-3. Structure elements, from the marked-content IDs and the parent tree.
-4. A cross-check of boxes against pypdfium2 (see the open questions).
-5. Vertical writing (`/Identity-V`, `/W2`, `/DW2`) and the predefined CJK
+2. Structure elements, from the marked-content IDs and the parent tree.
+3. A cross-check of boxes against pypdfium2 (see the open questions).
+4. Vertical writing (`/Identity-V`, `/W2`, `/DW2`) and the predefined CJK
    CMaps, which need Adobe's CMap resources.
 
 ### 5.3 Fonts
