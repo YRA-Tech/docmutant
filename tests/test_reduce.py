@@ -152,6 +152,44 @@ def test_needed_text_is_kept_but_swapped_at_equal_widths() -> None:
     assert [c == 32 for c in shown[0]] == [c == 32 for c in original]
 
 
+@pytest.mark.parametrize(
+    ("to_unicode", "expected"),
+    [
+        (b"1 beginbfchar <0003> <0020> endbfchar", {3}),
+        # The space in a range, as in <0003> <0004> <0020>: CID 4 is "!".
+        (b"1 beginbfrange <0003> <0004> <0020> endbfrange", {3}),
+        (b"1 beginbfrange <0003> <0004> [<0041> <0020>] endbfrange", {4}),
+        (b"1 beginbfchar <0003> <00A0> endbfchar", {3}),
+        (b"1 beginbfrange <0003> <0004> <0041> endbfrange", set()),
+    ],
+)
+def test_composite_font_keeps_its_spaces(to_unicode: bytes, expected: set[int]) -> None:
+    pdf = pikepdf.Pdf.new()
+    font = pikepdf.Dictionary(
+        Subtype=pikepdf.Name.Type0,
+        Encoding=pikepdf.Name("/Identity-H"),
+        DescendantFonts=[pikepdf.Dictionary(W=[1, [500, 500, 500, 500]])],
+        ToUnicode=pdf.make_stream(to_unicode),
+    )
+    assert font_codes(font).keep == expected
+
+
+def test_simple_font_keeps_the_spaces_its_encoding_and_to_unicode_name() -> None:
+    pdf = pikepdf.Pdf.new()
+    font = pikepdf.Dictionary(
+        Subtype=pikepdf.Name.Type1,
+        FirstChar=1,
+        Widths=[500] * 40,
+        Encoding=pikepdf.Dictionary(
+            Differences=[1, pikepdf.Name("/space"), 32, pikepdf.Name("/A")]
+        ),
+        ToUnicode=pdf.make_stream(b"1 beginbfchar <05> <0020> endbfchar"),
+    )
+    assert font_codes(font).keep == {1, 5}
+    del font.Encoding, font.ToUnicode
+    assert font_codes(font).keep == {32}
+
+
 def test_needed_image_keeps_its_place_but_not_its_samples() -> None:
     source = _source_pdf()
     with pikepdf.open(io.BytesIO(source)) as pdf:

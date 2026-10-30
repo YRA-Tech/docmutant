@@ -10,12 +10,11 @@ import pypdfium2 as pdfium
 import pypdfium2.raw as pdfium_c
 import pytest
 
-from docmutant.mutate import read_stream
+from docmutant.mutate import read_stream, to_unicode
 from docmutant.tracker import (
     DEFAULT_ASCENT,
     DEFAULT_DESCENT,
     UnsupportedText,
-    _to_unicode,
     group_lines,
     trace_page,
 )
@@ -627,24 +626,22 @@ def test_a_mirrored_line_reads_along_its_own_direction():
 )
 def test_to_unicode(body, expected):
     pdf = pikepdf.Pdf.new()
-    assert _to_unicode(pdf.make_stream(body)) == expected
+    assert to_unicode(pdf.make_stream(body)) == expected
 
 
-def _type0_with_to_unicode(content: bytes, to_unicode: bytes | None) -> pikepdf.Pdf:
+def _type0_with_to_unicode(content: bytes, cmap: bytes | None) -> pikepdf.Pdf:
     pdf = _type0_pdf(content, pikepdf.Name("/Identity-H"), None, 500)
-    if to_unicode is not None:
+    if cmap is not None:
         font = pdf.pages[0].Resources.Font.F1
-        font.ToUnicode = pdf.make_stream(to_unicode)
+        font.ToUnicode = pdf.make_stream(cmap)
     return pdf
 
 
 def test_a_composite_font_names_its_spaces_in_to_unicode():
     # CID 3 is the usual space of a subset TrueType font; here also U+00A0 at CID 4.
-    to_unicode = b"1 beginbfrange <0001> <0002> <0041> endbfrange 2 beginbfchar "
-    to_unicode += b"<0003> <0020> <0004> <00A0> endbfchar"
-    pdf = _type0_with_to_unicode(
-        b"BT /F1 10 Tf <00010002000300010004000200030003> Tj ET", to_unicode
-    )
+    cmap = b"1 beginbfrange <0001> <0002> <0041> endbfrange 2 beginbfchar "
+    cmap += b"<0003> <0020> <0004> <00A0> endbfchar"
+    pdf = _type0_with_to_unicode(b"BT /F1 10 Tf <00010002000300010004000200030003> Tj ET", cmap)
     (line,) = group_lines(trace_page(pdf.pages[0]))
     assert [word.text for word in line.words] == ["AB", "A", "B"]
     assert line.text == "AB A B"

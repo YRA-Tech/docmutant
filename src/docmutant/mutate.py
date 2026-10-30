@@ -395,17 +395,22 @@ def font_codes(font: pikepdf.Object) -> FontCodes | None:
     if subtype in SIMPLE_FONT_SUBTYPES and "/Widths" in font and "/FirstChar" in font:
         first = int(font.FirstChar)
         widths = {first + i: float(w) for i, w in enumerate(font.Widths)}
-        return FontCodes(1, widths, frozenset({32}))
+        text = {**simple_spaces(font.get("/Encoding")), **to_unicode(font.get("/ToUnicode"))}
+        return FontCodes(1, widths, _spaces(text))
     if subtype == "/Type0" and font.get("/Encoding") == "/Identity-H":
         descendant = font.DescendantFonts[0]
         default = float(descendant.get("/DW", 1000))
         widths = cid_widths(descendant.get("/W"))
         if not widths:
             return None
-        keep = frozenset(_tounicode_spaces(font.get("/ToUnicode")))
+        keep = _spaces(to_unicode(font.get("/ToUnicode")))
         widths = {cid: (w if w is not None else default) for cid, w in widths.items()}
         return FontCodes(2, widths, keep)
     return None
+
+
+def _spaces(text: dict[int, str]) -> frozenset[int]:
+    return frozenset(code for code, item in text.items() if item.isspace())
 
 
 def cid_widths(w_array: pikepdf.Object | None) -> dict[int, float]:
@@ -431,18 +436,87 @@ def cid_widths(w_array: pikepdf.Object | None) -> dict[int, float]:
     return widths
 
 
-_BFCHAR = re.compile(rb"<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>")
+CMAP_TOKEN = re.compile(
+    rb"%[^\r\n]*|\([^)]*\)|<[0-9A-Fa-f\s]*>|\[|\]|/[^\s/<>\[\]()%]+|[^\s/<>\[\]()%]+"
+)
 
 
-def _tounicode_spaces(stream: pikepdf.Object | None) -> list[int]:
-    """Codes that a ToUnicode CMap maps to U+0020 (bfchar entries only)."""
+def _hex_bytes(token: bytes) -> bytes:
+    digits = b"".join(token[1:-1].split())
+    return bytes.fromhex((digits + b"0" * (len(digits) % 2)).decode())
+
+
+def to_unicode(stream: pikepdf.Object | None) -> dict[int, str]:
+    """Code to text, from the ``bfchar`` and ``bfrange`` sections of a ``/ToUnicode`` CMap.
+
+    A damaged CMap gives what was read before the damage: the text decides only where
+    words end, so it is no reason to refuse a page whose positions are known.
+    """
     if not isinstance(stream, pikepdf.Stream):
-        return []
+        return {}
     try:
-        data = stream.read_bytes()
+        tokens = [t for t in CMAP_TOKEN.findall(stream.read_bytes()) if not t.startswith(b"%")]
     except pikepdf.PdfError:
-        return []
-    return [int(src, 16) for src, dst in _BFCHAR.findall(data) if dst.lower() == b"0020"]
+        return {}
+
+    def code(token: bytes) -> int:
+        return int.from_bytes(_hex_bytes(token), "big")
+
+    def text(target: bytes) -> str:
+        return target.decode("utf-16-be", "replace")
+
+    mapping: dict[int, str] = {}
+    section: bytes | None = None
+    operands: list[bytes] = []
+    try:
+        for token in tokens:
+            if token in (b"beginbfchar", b"beginbfrange"):
+                section, operands = token, []
+            elif token in (b"endbfchar", b"endbfrange"):
+                section = None
+            elif section is not None:
+                operands.append(token)
+                if section == b"beginbfchar" and len(operands) == 2:
+                    mapping[code(operands[0])] = text(_hex_bytes(operands[1]))
+                    operands = []
+                elif section == b"beginbfrange" and len(operands) >= 3:
+                    first, last = code(operands[0]), code(operands[1])
+                    last = min(last, first + 65535)
+                    if operands[2] != b"[":
+                        # One target: its value counts up with the code.
+                        target = _hex_bytes(operands[2])
+                        base, size = int.from_bytes(target, "big"), len(target)
+                        for value in range(first, last + 1):
+                            shifted = (base + value - first) % (1 << (8 * size))
+                            mapping[value] = text(shifted.to_bytes(size, "big"))
+                        operands = []
+                    elif token == b"]":
+                        targets = operands[3:-1]
+                        for value, item in zip(range(first, last + 1), targets, strict=False):
+                            mapping[value] = text(_hex_bytes(item))
+                        operands = []
+    except ValueError:
+        pass
+    # U+0000 is what some producers write for a glyph they could not name.
+    return {value: item for value, item in mapping.items() if item != "\x00"}
+
+
+def simple_spaces(encoding: pikepdf.Object | None) -> dict[int, str]:
+    """Codes that a simple font's encoding names as spaces: 32 unless ``/Differences`` moves it."""
+    spaces = {32: " "}
+    if not isinstance(encoding, pikepdf.Dictionary):
+        return spaces
+    code = 0
+    for item in encoding.get("/Differences", []):
+        if isinstance(item, pikepdf.Name):
+            if item in ("/space", "/nbspace"):
+                spaces[code] = " "
+            else:
+                spaces.pop(code, None)
+            code += 1
+        else:
+            code = int(item)
+    return spaces
 
 
 def _swap_string(
