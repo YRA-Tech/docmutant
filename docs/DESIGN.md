@@ -438,7 +438,29 @@ Planned, in order:
 
 - **Width classes** (built): codes with equal advance width in a simple font or
   an Identity-H composite font, with ToUnicode spaces kept.
-- **Glyph availability** (planned): subset fonts lack glyphs that the document
+- **Fitted replacement** (built: `fit.py`, for the page's own content): writes
+  other real words into a line under the settings of 4.4. Each word keeps its
+  start. Every instruction that held a part of a word ends with the pen where
+  the source had it, by a `TJ` number if needed, so nothing later moves, however
+  it is positioned. An inner word must leave the minimum gap, and a word whose
+  end is held fits within the tolerance, with tracking if the limit allows it.
+  The output goes through the geometry oracle, and a line that fails returns to
+  its source text. The caller supplies the vocabulary; words are chosen by fit,
+  not by meaning.
+  A word keeps its source text, with the reason in the report, when its font
+  gives no text, it holds no run of two or more letters, it is in a form XObject
+  (which other pages may share), it mixes fonts or sizes, or its line is printed
+  over another line. Word count `free` is accepted, but the mutator does not yet
+  change the number of words. On 38 sample pages, it replaced 61% of 7,155 words
+  under scope `line` with 0.02 em tracking, and 46% with scope `word` and no
+  tracking, with no page failing the oracle. The largest group left is words
+  whose letters alternate between fonts (1,190), which would need a font change
+  inside the word. Because starts are kept, the distance to the next word still
+  shows the source word's width, so this mutator does not yet meet the reason
+  4.4 gives for `privacy` using scope `line`.
+- **Glyph availability** (partial): fitted replacement uses only codes that the
+  document shows in that font, which needs no font parsing but leaves out glyphs
+  a full font could draw. Planned: subset fonts lack glyphs that the document
   never used. fontTools reads the embedded program to tell which codes have
   glyphs, so a replacement uses only codes that render.
 - **Metric-compatible substitution** (planned): replace the embedded program
@@ -504,7 +526,7 @@ region and every text region that stayed, with the detector's confidence.
 | Oracle | Status |
 |---|---|
 | crash (signal), hang (timeout), error (nonzero exit) | built |
-| geometry: the word and line box settings of 4.4 (`geometry.py`); not yet run by a mode | built |
+| geometry: the word and line box settings of 4.4 (`geometry.py`); run by fitted replacement, not yet by a mode | built |
 | render difference against a second engine (pypdfium2 by default), with per-page `mean_abs_error` and `changed_pixels_ratio` | planned |
 | text-cell difference between two runs or two engines | planned |
 | invariant check for metamorphic families | planned |

@@ -134,6 +134,13 @@ class Glyph:
     em: float
     """Length of one font size across the baseline, in default user space."""
 
+    advance: float
+    """How far the glyph moves the pen along the baseline, in points: its width, ``Tc``
+    and, for a single-byte code 32, ``Tw``."""
+
+    tj_unit: float
+    """Points along the baseline for one unit of a ``TJ`` number."""
+
     @property
     def is_space(self) -> bool:
         return self.text is not None and self.text.isspace()
@@ -495,6 +502,12 @@ def trace(
                 width, width_from = metrics.width(code if cid is None else cid)
                 scaled = text_space @ text_matrix @ state.ctm
                 to_page = metrics.matrix @ scaled
+                direction = _unit(to_page.a, to_page.b)
+                advance = width * metrics.matrix.a * state.size + state.char_spacing
+                if code == 32 and length == 1:
+                    advance += state.word_spacing
+                next_matrix = pikepdf.Matrix(1, 0, 0, 1, advance * state.scale, 0) @ text_matrix
+                pen, next_pen = text_matrix @ state.ctm, next_matrix @ state.ctm
                 corners = (
                     (0.0, metrics.descent),
                     (width, metrics.descent),
@@ -519,13 +532,13 @@ def trace(
                     width_from=width_from,
                     height_from=metrics.height_from,
                     text=metrics.text.get(code),
-                    direction=_unit(to_page.a, to_page.b),
+                    direction=direction,
                     em=math.hypot(scaled.c, scaled.d),
+                    advance=(next_pen.e - pen.e) * direction[0]
+                    + (next_pen.f - pen.f) * direction[1],
+                    tj_unit=math.hypot(scaled.a, scaled.b) / 1000,
                 )
-                advance = width * metrics.matrix.a * state.size + state.char_spacing
-                if code == 32 and length == 1:
-                    advance += state.word_spacing
-                text_matrix = pikepdf.Matrix(1, 0, 0, 1, advance * state.scale, 0) @ text_matrix
+                text_matrix = next_matrix
 
         for index, instruction in enumerate(instructions):
             op = operator_name(instruction)

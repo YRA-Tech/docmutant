@@ -17,16 +17,7 @@ from typing import Literal, NamedTuple
 
 import pikepdf
 
-from docmutant.tracker import (
-    WORD_GAP,
-    Box,
-    Line,
-    Point,
-    Word,
-    extent,
-    group_lines,
-    trace_page,
-)
+from docmutant.tracker import WORD_GAP, Box, Line, Point, Word, group_lines, trace_page
 
 ROUNDING = 0.01
 """Points allowed for rounding where a bound is 0."""
@@ -189,14 +180,20 @@ def signed_gap(a: Box, b: Box) -> float:
 
 
 def _widest_letter_gap(words: Sequence[Word]) -> float:
-    """The widest gap between two letters of one word, in ems."""
+    """The largest distance of a letter from where the last one left the pen, in ems.
+
+    Measured from the pen, so ``Tc`` is part of the source's spacing and not tracking.
+    """
     widest = 0.0
     for word in words:
         for first, second in zip(word.glyphs, word.glyphs[1:], strict=False):
             em = max(first.em, second.em)
             if em:
-                gap = extent(second, first.direction)[0] - extent(first, first.direction)[1]
-                widest = max(widest, abs(gap) / em)
+                ux, uy = first.direction
+                shift = (second.origin[0] - first.origin[0]) * ux + (
+                    second.origin[1] - first.origin[1]
+                ) * uy
+                widest = max(widest, abs(shift - first.advance) / em)
     return widest
 
 

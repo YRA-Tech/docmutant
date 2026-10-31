@@ -384,6 +384,15 @@ def test_kerning_the_source_already_has_is_not_tracking():
     assert check_boxes(source, swapped, BoxSettings("word")).passed
 
 
+def test_character_spacing_is_not_tracking():
+    source = _lines(b"BT /F1 10 Tf 0.5 Tc [(A) 10 (B)] TJ ET")
+    # The kerning is gone, so the gaps between the letters differ, but no number moves them.
+    output = _lines(b"BT /F1 10 Tf 0.5 Tc (BA) Tj ET")
+    result = check_boxes(source, output, BoxSettings("line", within(1)))
+    assert result.passed, result.violations
+    assert result.largest_tracking == 0
+
+
 def test_tracking_with_free_word_count_ignores_the_spaces():
     source = _lines(b"BT /F1 10 Tf (AB AB) Tj ET")
     wider_space = _lines(b"BT /F1 10 Tf [(AB) -100 ( AB)] TJ ET")
