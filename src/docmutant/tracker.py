@@ -35,6 +35,7 @@ from docmutant.mutate import (
     SIMPLE_FONT_SUBTYPES,
     StreamRef,
     cid_widths,
+    encoding_text,
     simple_spaces,
     to_unicode,
 )
@@ -125,8 +126,8 @@ class Glyph:
     height_from: HeightSource
 
     text: str | None
-    """Unicode text of the glyph: from ``/ToUnicode``, and for the space of a simple
-    font from its encoding. None when the font does not say."""
+    """Unicode text of the glyph: from ``/ToUnicode``, or in a simple font from its
+    encoding and glyph names. None when the font does not say."""
 
     direction: Point
     """Unit vector along the baseline, in default user space."""
@@ -140,6 +141,9 @@ class Glyph:
 
     tj_unit: float
     """Points along the baseline for one unit of a ``TJ`` number."""
+
+    font_key: tuple[object, ...] = ()
+    """Identity of the font: the same in every stream that uses the same font object."""
 
     @property
     def is_space(self) -> bool:
@@ -366,7 +370,12 @@ def _font(name: str, font: pikepdf.Object) -> _Font:
         missing_width = float(descriptor.MissingWidth)
     first = int(font.get("/FirstChar", 0))
     widths = {first + i: float(w) for i, w in enumerate(font.Widths)}
-    text = {**simple_spaces(font.get("/Encoding")), **to_unicode(font.get("/ToUnicode"))}
+    encoding = font.get("/Encoding")
+    text = {
+        **simple_spaces(encoding),
+        **encoding_text(encoding),
+        **to_unicode(font.get("/ToUnicode")),
+    }
     if subtype != "/Type3":
         return _Font(
             widths, missing_width, "missing-width", *_vertical_extent(descriptor), text=text
@@ -385,6 +394,12 @@ def _font(name: str, font: pikepdf.Object) -> _Font:
         matrix=matrix,
         text=text,
     )
+
+
+def font_height(font: pikepdf.Object) -> tuple[float, float]:
+    """Ascent and descent that the tracker uses for a font, in thousandths of the font size."""
+    metrics = _font(str(font.get("/BaseFont", "/unnamed")), font)
+    return metrics.ascent * metrics.matrix.d * 1000, metrics.descent * metrics.matrix.d * 1000
 
 
 def _composite_font(name: str, font: pikepdf.Object) -> _Font:
@@ -498,6 +513,8 @@ def trace(
             metrics = font_metrics(state)
             mcid = next((m for m in reversed(marked) if m is not None), None)
             text_space = pikepdf.Matrix(state.size * state.scale, 0, 0, state.size, 0, state.rise)
+            font = state.font_object
+            font_key = font.objgen if font.is_indirect else ("direct", stream, state.font)
             for offset, length, code, cid in metrics.codes(bytes(string)):
                 width, width_from = metrics.width(code if cid is None else cid)
                 scaled = text_space @ text_matrix @ state.ctm
@@ -537,6 +554,7 @@ def trace(
                     advance=(next_pen.e - pen.e) * direction[0]
                     + (next_pen.f - pen.f) * direction[1],
                     tj_unit=math.hypot(scaled.a, scaled.b) / 1000,
+                    font_key=font_key,
                 )
                 text_matrix = next_matrix
 

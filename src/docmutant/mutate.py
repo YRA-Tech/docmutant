@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import math
@@ -12,6 +13,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 import pikepdf
+from fontTools.agl import toUnicode as glyph_name_text
+from fontTools.encodings.StandardEncoding import StandardEncoding
 from PIL import Image
 
 from docmutant.content import Instruction
@@ -517,6 +520,43 @@ def simple_spaces(encoding: pikepdf.Object | None) -> dict[int, str]:
         else:
             code = int(item)
     return spaces
+
+
+def encoding_text(encoding: pikepdf.Object | None) -> dict[int, str]:
+    """Code to text from a simple font's encoding: its named base and its glyph names.
+
+    A font with no named base has a built-in encoding, which only the font program knows, so
+    only its ``/Differences`` say anything. A glyph name that says nothing, such as ``g12``,
+    takes its code out of the table, because the code no longer means what the base says.
+    """
+    if isinstance(encoding, pikepdf.Name):
+        base, differences = encoding, []
+    elif isinstance(encoding, pikepdf.Dictionary):
+        base, differences = encoding.get("/BaseEncoding"), encoding.get("/Differences", [])
+    else:
+        return {}
+    text: dict[int, str] = {}
+    if base == "/StandardEncoding":
+        for code, name in enumerate(StandardEncoding):
+            if name != ".notdef":
+                text[code] = glyph_name_text(name)
+    elif base in ("/WinAnsiEncoding", "/MacRomanEncoding"):
+        codec = "cp1252" if base == "/WinAnsiEncoding" else "mac_roman"
+        for code in range(32, 256):
+            with contextlib.suppress(UnicodeDecodeError):
+                text[code] = bytes([code]).decode(codec)
+    code = 0
+    for item in differences:
+        if isinstance(item, pikepdf.Name):
+            named = glyph_name_text(str(item)[1:])
+            if named:
+                text[code] = named
+            else:
+                text.pop(code, None)
+            code += 1
+        else:
+            code = int(item)
+    return {value: item for value, item in text.items() if item}
 
 
 def _swap_string(

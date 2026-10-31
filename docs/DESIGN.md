@@ -145,7 +145,7 @@ profile, and only at the level that the user asks for.
 | Signal | `bug-repro` | `metamorphic` | `training` | `privacy` |
 |---|---|---|---|---|
 | Geometry | exact where the oracle needs it; the rest is removed | exact, except the one variable under test | exact, except words moved inside a held line (see 4.4) | as `training`; rounding is an opt-in level |
-| Text | equal-width swap | changed only as the family says | changed; labels updated with it | personal data replaced |
+| Text | equal-width swap | changed only as the family says | changed; labels updated with it | every word replaced (see 4.4) |
 | Glyph shapes | removed unless the oracle needs them | exact | exact, or a metric-compatible substitute | substitute |
 | Image samples | flat grey or noise | exact | exact, or a content-aware replacement | replaced by image class |
 | Image geometry | exact | exact | exact | exact |
@@ -201,6 +201,8 @@ Each "exact" cell in the table maps to an oracle that runs on every candidate:
 - geometry: the output's word or line boxes, by the scope, stay within the box
   tolerance of the source's and keep the minimum gap (see 4.4); the CTMs of kept
   units are equal;
+- coverage, where a profile sets `all`: every word in scope changed, and pdfium
+  reads no word of the source on the page (see 4.4);
 - image geometry: width, height, bit depth, colour space and filter are equal;
 - structure: the tag tree has the same shape and the same marked-content IDs;
 - labels (`training`): labels computed from the output equal the updated
@@ -222,6 +224,8 @@ source text. They are separate from the profile, and each profile has defaults.
 | Tracking limit | ems per gap between letters | 0 |
 | Word count | `fixed`, `free` | `fixed` |
 | Minimum gap | one value for words, one for lines | words 0.15 em, lines 0 |
+| Coverage | `best-effort`, `all` | by profile |
+| Word starts | `pinned`, `moved` | by profile |
 
 **Scope** states which box the tolerance applies to. With `word`, each word box
 stays within the tolerance of its source box. Text must fit word by word, so
@@ -307,28 +311,76 @@ them.
   With scope `line`, the word gap always applies, because words move inside the
   line.
 
+**Coverage** states whether every word must change.
+
+- With `best-effort`, a word that has no fit keeps its source text, and the
+  report gives the reason.
+- With `all`, a word that cannot change stops the run, which names it. The user
+  loosens the settings or removes the text. The file written so far must not be
+  used.
+
+A word is in scope when it holds a letter or a digit, or a glyph whose text the
+font does not give. Punctuation alone is out of scope. A word counts as changed
+only when at least half of it differs by edit distance, with at least one change,
+so `Smith` to `Smyth` and `2024` to `2025` do not pass. A replacement is never a
+word of the source document, nor a part of one split at punctuation.
+
+Under `all`, a word goes down a ladder until something fits:
+
+1. a real word from the vocabulary;
+2. an invented word: each letter replaced by one of its case and of its kind
+   (vowel or consonant), each digit by a digit;
+3. a letter swap: the same, with any letter;
+4. a substitute font with more glyphs (see 5.3), and the ladder again;
+5. a stop.
+
+The manifest counts the words at each step, because invented words and swaps read
+as nonsense: they keep the file private, but they are not the plausible content
+that `training` asks for. A letter in steps 2 and 3 has no one fixed partner,
+because a fixed partner is a substitution cipher, which letter frequencies break.
+
+**Word starts** state what the distance to the next word shows.
+
+- With `pinned`, each word keeps its start. The distance to the next word then
+  still shows the width of the source word, whatever word now stands there.
+- With `moved`, words are chosen without regard to the width of the source word,
+  and the gaps take up the difference, each in proportion to its room. It applies
+  only with scope `line`. A gap wider than 0.75 em is structure, such as the space
+  between table cells, and stays where it is, so that words do not leave their cell.
+
+Changing every word and hiding the source are separate properties. A file can pass
+coverage and still show the width of every word. Under `moved`, some width still
+shows: a line with one word, a stretch whose gaps have no room, and a number, whose
+digits are often all one width.
+
 The text-position tracker computes the boxes from font metrics (see 5.2).
 
-| Profile | Scope | Box tolerance | Tracking limit | Word count | Minimum gap |
-|---|---|---|---|---|---|
-| `bug-repro` | not checked, unless the user sets it | | | | |
-| `metamorphic` | `word` | `exact`, unless box position is the variable | 0 | `fixed` | defaults |
-| `training` | `line`; `word` is allowed | `exact`; `contain` and `±d` are allowed because labels are rebuilt from the output | 0.02 em | `fixed`; `free` is allowed | defaults |
-| `privacy` | `line` | `exact`; at level 2, at least `±` half the grid step | 0.02 em | `fixed`; `free` is allowed | defaults |
+| Profile | Scope | Box tolerance | Tracking limit | Word count | Minimum gap | Coverage | Word starts |
+|---|---|---|---|---|---|---|---|
+| `bug-repro` | not checked, unless the user sets it | | | | | `best-effort`: the oracle must be able to keep the trigger, and what stays goes in the evidence | `pinned` |
+| `metamorphic` | `word` | `exact`, unless box position is the variable | 0 | `fixed` | defaults | does not apply: text changes only as the family says | `pinned` |
+| `training` | `line`; `word` is allowed | `exact`; `contain` and `±d` are allowed because labels are rebuilt from the output | 0.02 em | `fixed`; `free` is allowed | defaults | `best-effort`; `all` is allowed | `pinned`; `moved` is allowed |
+| `privacy` | `line` | `exact`; at level 2, at least `±` half the grid step | 0.02 em | `fixed`; `free` is allowed | defaults | `all` | `moved` |
 
-`privacy` uses `line` because a replacement of exactly the same width keeps the
-width of each word, which narrows down what the original word could have been.
+`privacy` uses `line` and `moved` because a replacement that keeps the width of
+each word narrows down what the original word could have been. On the sample, the
+system dictionary holds a median of 83 words within 0.005 em of a source word's
+width, and 10 or fewer for one word in five.
+
+`all` makes scope `word` impractical: exact word boxes leave most documents with
+words that cannot change. It is allowed but stops on most files.
 
 A line that no replacement can fit is left unchanged and reported, as with any
-mutation that breaks a kept signal (see 4.3). Under `privacy`, a line that holds
-personal data cannot stay: the run stops and names the line, and the user
-loosens the settings or removes the text.
+mutation that breaks a kept signal (see 4.3). Under coverage `all`, it stops the
+run.
 
 The manifest records every setting with the geometry oracle result: the largest
 edge movement found for lines and, with `fixed` word count, for words; the
 largest tracking used; the smallest word and line gaps found; the number of pairs
 that broke the gap rule; and the number of lines left unchanged or with a changed
-word count.
+word count. It also records the coverage result: the words in and out of scope,
+the words changed, those at each step of the ladder, and the share of words still
+at the source's distance from the next word.
 
 The defaults come from a measurement on 12 sample documents (at most 5 pages
 each; 3,774 words made only of letters, in one font, with `/ToUnicode`). It asked
@@ -411,8 +463,11 @@ compared with the one before it. A new line starts when the glyph turns away
 from the baseline, shares less than half its height with the previous glyph,
 jumps back more than 1 em or forward more than 2 em, or changes between visible
 and invisible. Inside a line, a space or a gap of more than 0.15 em ends a word.
-Spaces come from `/ToUnicode` (`bfchar` and `bfrange`) and, in a simple font,
-from the encoding. Each box is a rectangle in the frame of its line, as 4.4
+Text comes from `/ToUnicode` (`bfchar` and `bfrange`) and, in a simple font, from
+the encoding: a named base encoding and the glyph names of `/Differences`, read
+through the Adobe Glyph List. A font with no named base has a built-in encoding,
+which only its program knows, so only its `/Differences` count. A name that says
+nothing, such as `g12`, gives no text. Each box is a rectangle in the frame of its line, as 4.4
 requires, and a line box is the union of its word boxes.
 
 On the sample documents, 99% of the words match pdfium's exactly. In the rest,
@@ -420,8 +475,8 @@ pdfium joins words hyphenated across lines, expands ligatures or leaves out a
 space, or the font's `/ToUnicode` maps a hyphen to U+0000. The sample has no gaps between 0.05 and 0.3 em, so it
 confirms the word gap of 0.15 em but does not pin it down; that value comes from
 typography (kerning stays under about 0.1 em, word spaces rarely fall under
-0.18 em). Known limits: a font with no `/ToUnicode` and a space at an unknown
-code runs words together, letter spacing (`Tc`) above 0.15 em splits a word into
+0.18 em). Known limits: a font with no text for a space at an unknown code runs
+words together, letter spacing (`Tc`) above 0.15 em splits a word into
 single glyphs, and glyphs not drawn in reading order, such as logically ordered
 right-to-left text, make separate lines.
 
@@ -438,39 +493,63 @@ Planned, in order:
 
 - **Width classes** (built): codes with equal advance width in a simple font or
   an Identity-H composite font, with ToUnicode spaces kept.
-- **Fitted replacement** (built: `fit.py`, for the page's own content): writes
-  other real words into a line under the settings of 4.4. Each word keeps its
-  start. Every instruction that held a part of a word ends with the pen where
-  the source had it, by a `TJ` number if needed, so nothing later moves, however
-  it is positioned. An inner word must leave the minimum gap, and a word whose
-  end is held fits within the tolerance, with tracking if the limit allows it.
-  The output goes through the geometry oracle, and a line that fails returns to
-  its source text. The caller supplies the vocabulary; words are chosen by fit,
-  not by meaning.
-  A word keeps its source text, with the reason in the report, when its font
-  gives no text, it holds no run of two or more letters, it is in a form XObject
-  (which other pages may share), it mixes fonts or sizes, or its line is printed
-  over another line. Word count `free` is accepted, but the mutator does not yet
-  change the number of words. On 38 sample pages, it replaced 61% of 7,155 words
-  under scope `line` with 0.02 em tracking, and 46% with scope `word` and no
-  tracking, with no page failing the oracle. The largest group left is words
-  whose letters alternate between fonts (1,190), which would need a font change
-  inside the word. Because starts are kept, the distance to the next word still
-  shows the source word's width, so this mutator does not yet meet the reason
-  4.4 gives for `privacy` using scope `line`.
+- **Fitted replacement** (built: `fit.py`): writes other words into a line under
+  the settings of 4.4. New codes flow from the start of the word. Every instruction
+  that held a part of the word begins by moving the pen to where the flow needs it
+  and ends with the pen where the source had it, by `TJ` numbers if needed, so
+  nothing else moves, however it is positioned. With word starts `pinned`, an inner
+  word must leave the minimum gap, and a word whose end is held fits within the
+  tolerance, with tracking if the limit allows it. With `moved`, the gaps of each
+  stretch between wide gaps take up the difference. The output goes through the
+  geometry oracle, and a line that fails returns to its source text. The caller
+  supplies the vocabulary; words are chosen by fit, not by meaning, so it should be
+  curated: a general dictionary puts unsuitable words into the output.
+
+  Under coverage `best-effort`, a word keeps its source text, with the reason in the
+  report, when its font gives no text, it holds no run of two or more letters, it is
+  in a form XObject, it mixes fonts or sizes, or its line is printed over another
+  line. Under `all`, each of these changes. A form gets a copy for each drawing with
+  text, because other drawings and pages can share it. A line printed over another
+  with the same text takes the same new text. A word in several fonts changes letter
+  by letter, each letter in its own font, and its letters flow across the change of
+  font. A glyph with no known text is swapped for another code of its font.
+
+  On 38 sample pages with 6,954 words in scope, a system dictionary and scope `line`
+  with 0.02 em tracking, no page failed the geometry oracle:
+
+  | Settings | Words changed | Pages stopped | Words at the source's distance from the next |
+  |---|---|---|---|
+  | `best-effort`, `pinned` | 68.5% | not applicable | 100% |
+  | `all`, `pinned`, no font source | 99.57% | 18 | 100% |
+  | `all`, `moved`, Liberation fonts | 99.94% | 4 | 11.4% |
+  | the same, tolerance `±1` | 100% | 0 | not measured |
+
+  Under `all` and `moved`, 70% of the words changed were real words, 29% invented
+  and 1% letter swaps. pdfium reads 40,517 of the 40,519 glyph origins within 0.2 pt
+  of the tracker. The 4 words left are a lone `1` at a held line end, with no
+  glyph of its width, in a font that cannot take a substitute, and three narrow words
+  (`1.0`, `III`, `III,`) whose stretch has too little room for any wider letters.
+  31 lines kept their word starts because their gaps had too little room. One further page cannot be
+  read at all, because a font relies on built-in metrics (see 5.2).
 - **Glyph availability** (partial): fitted replacement uses only codes that the
   document shows in that font, which needs no font parsing but leaves out glyphs
   a full font could draw. Planned: subset fonts lack glyphs that the document
   never used. fontTools reads the embedded program to tell which codes have
   glyphs, so a replacement uses only codes that render.
-- **Metric-compatible substitution** (planned): replace the embedded program
-  with an open font that has the same advance widths, so that any text can be
-  set without moving a line: Liberation Sans, Serif and Mono (for Arial,
-  Times New Roman, Courier New), Carlito (Calibri), Caladea (Cambria), and
-  further families from a table. The substitute is subset to the codes used,
-  `/Widths` or `/W` and `/ToUnicode` are rewritten, and the OFL terms (including
-  Reserved Font Names) are honoured. This also removes the source's font
-  program, which the copyright and privacy claims need.
+- **Metric-compatible substitution** (built: `substitute.py`): replaces the
+  embedded program with an open font: Liberation Sans, Serif and Mono (for Arial,
+  Times New Roman, Courier New), Carlito (Calibri), Caladea (Cambria), or else a
+  Liberation font by the font's flags, which changes the look but not the layout.
+  Under coverage `all`, a font of a word that could not change gets one, if a font
+  source is given. It keeps every code the document shows, with its text, advance
+  and height, and adds the letters and digits it lacks at codes it does not use,
+  with widths scaled to the source font. A Type3 font becomes a TrueType font, its
+  widths converted through its `/FontMatrix`. A font with a shown code of unknown
+  text, or a composite font without Identity-H, stays. `/Widths` or `/W` and
+  `/ToUnicode` are rewritten. The subset keeps the copyright and license entries
+  and drops the font's names, because the OFL reserves some names for unmodified
+  fonts. This also removes the source's font program, which the copyright and
+  privacy claims need, but so far only for the fonts that needed more glyphs.
 
 ### 5.4 Images (built, basic)
 
@@ -527,6 +606,9 @@ region and every text region that stayed, with the detector's confidence.
 |---|---|
 | crash (signal), hang (timeout), error (nonzero exit) | built |
 | geometry: the word and line box settings of 4.4 (`geometry.py`); run by fitted replacement, not yet by a mode | built |
+| coverage: every word in scope changed, by the tracker's words (`coverage.py`); run by fitted replacement, not yet by a mode | built |
+| residual text: the words of the source that pdfium still reads on the page (`coverage.py`), which shares no code with the tracker | built |
+| other layers: text no replacement has reached, by layer, and a count of images (`coverage.py`) | built; the layers themselves are 5.6 |
 | render difference against a second engine (pypdfium2 by default), with per-page `mean_abs_error` and `changed_pixels_ratio` | planned |
 | text-cell difference between two runs or two engines | planned |
 | invariant check for metamorphic families | planned |
@@ -602,8 +684,10 @@ class Oracle(Protocol):
 ## 8. Dependencies and licensing
 
 Code: MIT. Required: pikepdf (MPL-2.0), pypdfium2 (Apache-2.0 or BSD-3-Clause),
-pydantic (MIT). Planned optional: fontTools (MIT), docling (MIT), presidio
-(MIT), Faker (MIT). No dependency's code is copied into docmutant's files.
+pydantic (MIT), fontTools (MIT). Planned optional: docling (MIT), presidio (MIT),
+Faker (MIT). Substitute fonts are not shipped: they are read from the system or a
+directory the user names, under their own licenses (OFL for Liberation, Carlito
+and Caladea). No dependency's code is copied into docmutant's files.
 
 ## 9. Roadmap
 
@@ -612,7 +696,7 @@ pydantic (MIT). Planned optional: fontTools (MIT), docling (MIT), presidio
 | M1 | Manifest, policy validation, CLI | done |
 | M2 | Reduce mode for rendering bugs, crash/hang oracles, basic evidence | built; first real-document runs in progress |
 | M3 | Text-position tracker; render-difference oracle; geometry (with the settings of 4.4) and image-geometry preservation oracles | next |
-| M4 | Font glyph availability and metric-compatible substitution | |
+| M4 | Font glyph availability and metric-compatible substitution | substitution built for fonts that need more glyphs; glyph availability from the font program next |
 | M5 | Hidden layers; anonymize mode with Docling selection; profiles; privacy normalization levels and fingerprint report; schema 0.2 | |
 | M6 | Fuzz and metamorphic modes; corpus packaging | |
 
@@ -631,5 +715,10 @@ pydantic (MIT). Planned optional: fontTools (MIT), docling (MIT), presidio
   tracker with each glyph until the next positioning operator.
 - How much tracking stays invisible. The default of 0.02 em per gap is an
   estimate; the render-difference oracle should test it.
+- How wide a gap counts as structure. The 0.75 em for holding a gap under word
+  starts `moved` is an estimate: a justified word space can come close to it, and
+  table cells can be closer.
+- Which vocabulary to ship. Fitted replacement takes one from the caller, and the
+  system dictionary used for measuring holds words unsuited to published output.
 - How to model text-in-scan replacement so that OCR training data keeps the
   noise and skew statistics of the original scan.
