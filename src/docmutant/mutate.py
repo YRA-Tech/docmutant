@@ -449,6 +449,10 @@ def _hex_bytes(token: bytes) -> bytes:
     return bytes.fromhex((digits + b"0" * (len(digits) % 2)).decode())
 
 
+_DOUBLED_MATH = re.compile("([\U0001d400-\U0001d7ff])\\1")
+"""Some producers write a math letter twice in a /ToUnicode for one glyph."""
+
+
 def to_unicode(stream: pikepdf.Object | None) -> dict[int, str]:
     """Code to text, from the ``bfchar`` and ``bfrange`` sections of a ``/ToUnicode`` CMap.
 
@@ -466,7 +470,7 @@ def to_unicode(stream: pikepdf.Object | None) -> dict[int, str]:
         return int.from_bytes(_hex_bytes(token), "big")
 
     def text(target: bytes) -> str:
-        return target.decode("utf-16-be", "replace")
+        return _DOUBLED_MATH.sub(r"\1", target.decode("utf-16-be", "replace"))
 
     mapping: dict[int, str] = {}
     section: bytes | None = None

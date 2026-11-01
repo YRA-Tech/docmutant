@@ -614,13 +614,14 @@ def test_a_scarce_type3_font_changes_with_a_substitute():
     assert report.geometry.passed, report.geometry.violations
 
 
-def test_a_substitute_cannot_stand_for_a_code_with_no_text():
+def test_a_code_with_no_text_draws_nothing_in_a_substitute():
     pdf = _pdf(b"BT /F1 10 Tf 72 700 Td (a) Tj ET", glyphs=b"")
     font = pdf.pages[0].Resources.Font.F1
     del font.ToUnicode
     fitter = WordFitter(pdf, [])
-    with pytest.raises(CannotSubstitute, match="no text"):
-        embed_substitute(pdf, font, _Boxes().pick(font), fitter.shown[font.objgen])
+    embed_substitute(pdf, font, _Boxes().pick(font), fitter.shown[font.objgen])
+    differences = list(font.Encoding.Differences)
+    assert differences[differences.index(97) + 1] == "/space"
 
 
 def test_a_substitute_that_lacks_a_shown_glyph_is_refused():

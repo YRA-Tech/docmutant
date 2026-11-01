@@ -6,7 +6,8 @@ it differs (by edit distance), so that ``Smith`` to ``Smyth`` does not pass.
 
 The first check pairs the tracker's words in drawing order. The tracker also decides what a
 word is, so ``residual_text`` asks pdfium, which shares no code with it, which words of the
-source it can still read. ``other_layers`` names the text that neither of them looks at.
+source it can still read. ``other_layers`` names the text that neither of them looks at, and
+``curved_fills`` counts what may be text that no text operator draws.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from dataclasses import dataclass
 import pikepdf
 import pypdfium2 as pdfium
 
+from docmutant.content import operator_name
 from docmutant.mutate import content_streams, read_stream
 from docmutant.tracker import Line, Word
 
@@ -29,6 +31,14 @@ ROUNDING_EMS = 0.01
 RESIDUAL_LENGTH = 3
 """Shortest run of letters or digits that residual text looks for: a shorter one matches by
 chance."""
+
+DRAWN_TEXT = 100
+"""Curved shapes on a page above which it may show text as outlines, or a logo. On the sample,
+pages of outlined text hold 120 to 2,845 and no glyphs; two with logos hold 140 and 172; every
+other page holds at most 35. The count says that someone must look, not what is there."""
+
+_FILLS = frozenset({"f", "F", "f*", "B", "B*", "b", "b*"})
+_PAINTS = _FILLS | {"S", "s", "n"}
 
 Token = str | int
 """A letter or digit, casefolded; or the code of a glyph whose text is not known."""
@@ -151,6 +161,42 @@ def residual_text(
     return found
 
 
+def curved_fills(page: pikepdf.Page) -> int:
+    """How many curved shapes a page fills, at any depth of forms.
+
+    The tracker reads text operators, so text drawn as outlines has no words for it to count, and
+    every check of the words passes on such a page without having looked at anything.
+    """
+    seen: set[tuple[int, int]] = set()
+
+    def count(stream: pikepdf.Object, resources: pikepdf.Object | None) -> int:
+        total = shapes = 0
+        curved = False
+        xobjects = resources.get("/XObject") if resources is not None else None
+        for instruction in pikepdf.parse_content_stream(stream):
+            operator = operator_name(instruction)
+            if operator == "m":
+                shapes += 1
+            elif operator in ("c", "v", "y"):
+                curved = True
+            elif operator in _PAINTS:
+                if curved and operator in _FILLS:
+                    total += shapes
+                shapes, curved = 0, False
+            elif operator == "Do" and xobjects is not None:
+                form = xobjects.get(instruction.operands[0])
+                if (
+                    isinstance(form, pikepdf.Stream)
+                    and form.get("/Subtype") == "/Form"
+                    and form.objgen not in seen
+                ):
+                    seen.add(form.objgen)
+                    total += count(form, form.get("/Resources", resources))
+        return total
+
+    return count(page, page.obj.get("/Resources"))
+
+
 def _text_keys(obj: pikepdf.Object, keys: frozenset[str]) -> bool:
     return isinstance(obj, (pikepdf.Dictionary, pikepdf.Stream)) and any(
         key in obj and len(str(obj[key])) > 0 for key in keys
@@ -176,7 +222,8 @@ class OtherLayers:
 def other_layers(pdf: pikepdf.Pdf) -> OtherLayers:
     """What a run under coverage ``all`` must still remove or clean: see 5.6 of the design."""
     found: Counter[str] = Counter()
-    if len(pdf.docinfo):
+    info = pdf.trailer.get("/Info")
+    if info is not None and len(info):
         found["document info"] += 1
     for key, label in (
         ("/Outlines", "outlines"),

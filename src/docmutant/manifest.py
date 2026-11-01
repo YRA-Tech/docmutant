@@ -20,7 +20,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-SCHEMA_VERSION = "0.1"
+SCHEMA_VERSION = "0.2"
 MANIFEST_SUFFIX = ".docmutant.json"
 
 SHA256_PATTERN = r"^[0-9a-f]{64}$"
@@ -30,6 +30,21 @@ SHA256_PATTERN = r"^[0-9a-f]{64}$"
 ALL_RIGHTS_RESERVED = "LicenseRef-all-rights-reserved"
 UNKNOWN_LICENSE = "LicenseRef-unknown"
 PUBLIC_DOMAIN = "LicenseRef-public-domain"
+
+# The oracles that a privacy claim rests on: each must have run on the output and stayed silent.
+PRIVACY_ORACLES = frozenset(
+    {
+        "geometry",
+        "coverage",
+        "residual-text",
+        "hidden-text",
+        "other-layers",
+        "structure",
+        "image-geometry",
+        "drawn-text",
+    }
+)
+PRIVACY_STATEMENT = "privacy-"
 
 # Font licenses that allow a font program to stay in a file derived from a
 # restricted source. Any other kept font program would carry protected material.
@@ -153,10 +168,35 @@ class Attestation(_Model):
     )
 
 
+class ChangedSignal(_Model):
+    """A signal of 4.1 that the run changed, and the mutators that changed it."""
+
+    signal: str
+    mutators: list[str]
+
+
+class Profile(_Model):
+    """What the run kept and what it changed, under which settings. See 4 of the design."""
+
+    name: Literal["bug-repro", "metamorphic", "training", "privacy"]
+    settings: dict[str, Any] = Field(default_factory=dict)
+    preserved: dict[str, str] = Field(
+        default_factory=dict, description="Each kept signal and the oracle that checks it."
+    )
+    changed: list[ChangedSignal] = Field(default_factory=list)
+
+
+class Fingerprint(_Model):
+    """What stays exact and can link a file to its source. Only the privacy profile has one."""
+
+    level: Literal[0] = Field(default=0, description="The normalization level of 4.2.")
+    report: dict[str, Any] = Field(default_factory=dict)
+
+
 class Manifest(_Model):
     """Provenance, method, checks and terms for one output file."""
 
-    schema_version: Literal["0.1"] = SCHEMA_VERSION
+    schema_version: Literal["0.1", "0.2"] = SCHEMA_VERSION
     file: str = Field(description="File name of the PDF that this manifest describes.")
     sha256: str = Field(pattern=SHA256_PATTERN)
     tier: Tier
@@ -173,9 +213,25 @@ class Manifest(_Model):
     evidence: Evidence | None = None
     attestation: Attestation | None = None
     takedown_contact: str | None = None
+    claims: list[Literal["copyright", "training", "privacy"]] = Field(
+        default_factory=list,
+        description="What the file is said to be, each with its own evidence and statement.",
+    )
+    profile: Profile | None = None
+    fingerprint: Fingerprint | None = None
 
     @model_validator(mode="after")
     def _check_policy(self) -> Manifest:
+        if self.schema_version == "0.1" and (self.claims or self.profile or self.fingerprint):
+            raise ValueError("claims, profile and fingerprint need schema version 0.2")
+        if "training" in self.claims:
+            raise ValueError("a training claim needs a labels oracle, which is not built yet")
+        if "privacy" in self.claims:
+            self._check_privacy()
+        if self.fingerprint is not None and (
+            self.profile is None or self.profile.name != "privacy"
+        ):
+            raise ValueError("only the privacy profile has a fingerprint")
         for oracle in self.oracles:
             if oracle.observed != oracle.expected:
                 raise ValueError(
@@ -192,6 +248,21 @@ class Manifest(_Model):
             else:
                 self._check_derived()
         return self
+
+    def _check_privacy(self) -> None:
+        if self.profile is None or self.profile.name != "privacy":
+            raise ValueError("a privacy claim needs the privacy profile")
+        if self.fingerprint is None:
+            raise ValueError("a privacy claim needs a fingerprint report")
+        if self.evidence is None:
+            raise ValueError("a privacy claim needs evidence")
+        missing = PRIVACY_ORACLES - {oracle.name for oracle in self.oracles}
+        if missing:
+            raise ValueError(f"a privacy claim needs the oracles {', '.join(sorted(missing))}")
+        if self.attestation is None:
+            raise ValueError("a privacy claim needs an attestation")
+        if not self.attestation.statement_version.startswith(PRIVACY_STATEMENT):
+            raise ValueError(f"a privacy claim needs a {PRIVACY_STATEMENT}* statement")
 
     def _check_has_source(self) -> None:
         if self.source is None:

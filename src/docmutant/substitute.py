@@ -18,7 +18,7 @@ import re
 import statistics
 import string
 import unicodedata
-from collections.abc import Iterable, Mapping
+from collections.abc import Container, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -100,14 +100,12 @@ class FontSource:
         name = re.sub(r"^[A-Z]{6}\+", "", source_name).lower().replace(" ", "")
         name = name.replace("-", "").replace(",", "").replace("_", "")
         family = next((stem for rule, stem in METRIC_COMPATIBLE if rule.search(name)), None)
-        compatible = family is not None
-        if family is None:
-            if flags & FLAG_FIXED or re.search(r"mono|cmtt", name):
-                family = "LiberationMono"
-            elif flags & FLAG_SERIF or re.search(r"serif|roman|cmr|garamond|georgia", name):
-                family = "LiberationSerif"
-            else:
-                family = "LiberationSans"
+        if flags & FLAG_FIXED or re.search(r"mono|cmtt", name):
+            generic = "LiberationMono"
+        elif flags & FLAG_SERIF or re.search(r"serif|roman|cmr|garamond|georgia|cambria", name):
+            generic = "LiberationSerif"
+        else:
+            generic = "LiberationSans"
         bold = bool(flags & FLAG_FORCE_BOLD) or "bold" in name or "cmbx" in name
         italic = bool(flags & FLAG_ITALIC) or "italic" in name or "oblique" in name
         style = {
@@ -116,20 +114,25 @@ class FontSource:
             (False, True): "Italic",
             (True, True): "BoldItalic",
         }[(bold, italic)]
-        path = self.files.get(f"{family}-{style}") or self.files.get(f"{family}-Regular")
-        if path is None:
-            return None
-        return Substitute(source_name, path.stem, path.read_bytes(), compatible)
+        # Advances stay in any case, so a font of another family only looks further off.
+        for candidate in (family, generic):
+            path = self.files.get(f"{candidate}-{style}") or self.files.get(f"{candidate}-Regular")
+            if path is not None:
+                return Substitute(source_name, path.stem, path.read_bytes(), candidate == family)
+        return None
 
 
-def _characters(text: str) -> str | None:
-    """The one character of the substitute that draws this text, or None."""
-    if len(text) == 1:
-        return text
-    composed = unicodedata.normalize("NFKC", text)
-    if len(composed) == 1:
-        return composed
-    return {"fi": "ﬁ", "fl": "ﬂ", "ff": "ﬀ", "ffi": "ﬃ", "ffl": "ﬄ"}.get(text)
+def _character(text: str, has: Container[int]) -> str | None:
+    """The one character of the substitute that draws this text, or None.
+
+    A math letter has no glyph of its own in a text font, so it draws as the plain letter. A
+    ligature draws as one glyph.
+    """
+    for form in (text, unicodedata.normalize("NFKC", text)):
+        if len(form) == 1 and ord(form) in has:
+            return form
+    ligature = {"fi": "ﬁ", "fl": "ﬂ", "ff": "ﬀ", "ffi": "ﬃ", "ffl": "ﬄ"}.get(text)
+    return ligature if ligature is not None and ord(ligature) in has else None
 
 
 def _glyph_name(char: str) -> str:
@@ -170,9 +173,9 @@ def embed_substitute(
     """Replace the program of ``font`` in place.
 
     Advances and text of the codes in ``shown`` stay. A simple font, a Type3 font or an
-    Identity-H composite font can take a substitute, when the text of every shown code is
-    known and the substitute has it; otherwise this raises ``CannotSubstitute`` and the font
-    is unchanged.
+    Identity-H composite font can take a substitute, when the substitute has every letter and
+    digit that the font shows; otherwise this raises ``CannotSubstitute`` and the font is
+    unchanged. A code whose text is not known, or a symbol the substitute lacks, draws nothing.
     """
     composite = font.get("/Subtype") == "/Type0"
     if composite and font.get("/Encoding") != "/Identity-H":
@@ -182,24 +185,31 @@ def embed_substitute(
         factor = float(font.get("/FontMatrix", [0.001])[0]) * 1000
     ascent, descent = font_height(font)
 
-    drawn: dict[int, str] = {}
-    known: dict[int, str] = {}
-    for code, entry in shown.items():
-        if entry.text is None:
-            raise CannotSubstitute(f"code {code} has no text")
-        known[code] = entry.text
-        if entry.text and not entry.text.isspace():
-            char = _characters(entry.text)
-            if char is None:
-                raise CannotSubstitute(f"no one glyph draws {entry.text!r}")
-            drawn[code] = char
-
-    program = TTFont(io.BytesIO(substitute.program))
+    program = TTFont(io.BytesIO(substitute.program), recalcTimestamp=False)
     if "glyf" not in program:
         raise CannotSubstitute("substitute has no TrueType outlines")
     cmap = program.getBestCmap()
-    if any(ord(char) not in cmap for char in drawn.values()):
-        raise CannotSubstitute("substitute lacks a glyph the document shows")
+
+    drawn: dict[int, str] = {}
+    blank: set[int] = set()
+    known: dict[int, str] = {}
+    for code, entry in shown.items():
+        if entry.text is None:
+            # What it draws is not known. A word with it must change anyway under coverage all.
+            blank.add(code)
+            continue
+        known[code] = entry.text
+        if entry.text.isspace():
+            blank.add(code)
+        elif entry.text:
+            char = _character(entry.text, cmap)
+            if char is not None:
+                drawn[code] = char
+            elif any(part.isalnum() for part in entry.text):
+                raise CannotSubstitute(f"substitute lacks a glyph for {entry.text!r}")
+            else:
+                # A symbol it lacks, or U+FFFD: its advance stays, and a page loses only a mark.
+                blank.add(code)
     metrics = program["hmtx"]
     scale = 1000 / program["head"].unitsPerEm
     width_of = {value: metrics[name][0] * scale for value, name in cmap.items()}
@@ -255,9 +265,7 @@ def embed_substitute(
         used = set(shown)
         code = 0x100
         cids: dict[int, str] = dict(drawn)
-        for cid, text in known.items():
-            if text.isspace():
-                cids[cid] = " "
+        cids.update(dict.fromkeys(blank, " "))
         widths = {cid: shown[cid].width for cid in shown}
         for char in add:
             while code in used:
@@ -296,9 +304,7 @@ def embed_substitute(
         widths[code] = round(width_of[ord(char)] * ratio, 3)
         known[code] = char
         new[char] = (bytes([code]), widths[code])
-    for code, text in known.items():
-        if text.isspace():
-            codes[code] = " "
+    codes.update(dict.fromkeys(blank, " "))
     first, last = min(widths), max(widths)
     differences: list[object] = []
     for code in sorted(codes):

@@ -36,9 +36,11 @@ the labels stay exact.
 ## Status
 
 Pre-alpha. Built so far: the manifest model with its policy checks, a
-validator, and a first reduce/sanitize mode for rendering bugs with crash,
-hang and error oracles that run docling-parse. See
-[docs/DESIGN.md](docs/DESIGN.md) for the design and the roadmap.
+validator, a first reduce/sanitize mode for rendering bugs with crash, hang and
+error oracles that run docling-parse, and an anonymize mode that changes every
+word and every hidden layer of a document, and writes nothing unless the saved
+file passes its checks. See [docs/DESIGN.md](docs/DESIGN.md) for the design and
+the roadmap.
 
 ```console
 $ docmutant reduce manual.pdf --page 7 --out p7.pdf --oracle crash \
@@ -46,6 +48,7 @@ $ docmutant reduce manual.pdf --page 7 --out p7.pdf --oracle crash \
     --silent-python /path/to/fixed/.venv/bin/python --scale 3.0
 $ docmutant attest p7.pdf.docmutant.json --reviewer "A. Reviewer"
 $ docmutant validate --check-file p7.pdf.docmutant.json
+$ docmutant anonymize report.pdf --out clean.pdf --profile privacy --tolerance 1
 $ docmutant schema                     # print the manifest JSON Schema
 ```
 

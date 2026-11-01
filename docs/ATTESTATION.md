@@ -34,6 +34,33 @@ below.
    control), it found neither the file nor any searched region of it.
 7. The oracle still gives the result that the manifest claims.
 
+## Privacy statement (version privacy-0.1-draft)
+
+A file with a `privacy` claim needs this statement instead. It is for what the oracles
+cannot see: they do not read pictures or drawings, and they do not know what is
+personal.
+
+> I reviewed the file named in this manifest, its recorded evidence, its fingerprint
+> report and a side-by-side render with its source, against checklist version
+> `<checklist_version>`.
+>
+> In my good-faith judgment, the file shows no personal data from its source, in any
+> layer, apart from what is listed under `evidence.kept` and in the fingerprint report,
+> which I judged not to identify anyone.
+>
+> This statement is my opinion, made in good faith. It is not a warranty.
+
+## Privacy checklist (version privacy-0.1)
+
+1. In the render, no word of the source can be read, anywhere on any page.
+2. Every drawing that stays shows nothing personal or identifying: no logo, signature,
+   QR code or text drawn as outlines. The evidence counts them; only a person can say
+   what they show.
+3. Every image is flat, as the manifest says.
+4. The values in the fingerprint report (page sizes, image sizes, fonts that stay) do
+   not point to one source, given who will receive the file.
+5. Each oracle that the manifest lists stayed silent.
+
 ## Signing
 
 Sign the commit that adds the file and its manifest, and put the commit's

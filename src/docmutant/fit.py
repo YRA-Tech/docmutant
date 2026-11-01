@@ -22,6 +22,7 @@ may have no glyph for any other code. A ``FontSource`` extends a font that has t
 from __future__ import annotations
 
 import bisect
+import contextlib
 import math
 import random
 import re
@@ -102,6 +103,11 @@ SWAP_TRIES = 5
 CLOSEST = 3
 """A swap takes one of this many closest widths, so that a letter has no one fixed partner:
 a fixed partner is a substitution cipher, which letter frequencies break."""
+
+PAGE_TRIES = 4
+"""Attempts at a page under coverage ``all``, each with other words: whether a tight line has
+room for its last word depends on the words before it. A line that the geometry oracle refused
+keeps its word starts in the next attempt: words of a formula lie too close to move."""
 
 DRAWS = 20
 """Random draws from the near words before checking them all."""
@@ -414,19 +420,25 @@ class WordFitter:
 
     ``vocabulary`` holds lowercase words. Which glyphs each font can draw is read once,
     from every page, before any page changes. ``fonts`` is where to find a substitute for
-    a font with too few glyphs; without it, such a word stays and is reported.
+    a font with too few glyphs; without it, such a word stays and is reported. No replacement
+    uses a word of ``avoid``, which is for words of the source that no page shows.
     """
 
     def __init__(
-        self, pdf: pikepdf.Pdf, vocabulary: Iterable[str], fonts: FontSource | None = None
+        self,
+        pdf: pikepdf.Pdf,
+        vocabulary: Iterable[str],
+        fonts: FontSource | None = None,
+        avoid: Iterable[str] = (),
     ) -> None:
         self.pdf = pdf
         self.vocabulary = sorted(set(vocabulary))
         self.source = fonts
         self.substituted: dict[str, str] = {}
         self.tried: set[tuple[object, ...]] = set()
+        self.replaced: set[tuple[object, ...]] = set()
         self.shown: dict[tuple[object, ...], dict[int, ShownCode]] = {}
-        self.source_words: set[str] = set()
+        self.source_words: set[str] = set(avoid)
         by_text: dict[tuple[object, ...], dict[str, _Code]] = {}
         self.codes: dict[tuple[object, ...], dict[bytes, _Code]] = {}
         for page in pdf.pages:
@@ -480,46 +492,60 @@ class WordFitter:
             lines = group_lines(glyphs)
             planned, left, blocked = self._plan_page(index, lines, glyphs, settings, policy, seed)
 
-        replaced = {number: sum(plan.tiers.values()) for number, plan in planned.items()}
-        pinned = sum(plan.pinned for plan in planned.values())
-        streams = {edit.stream for plan in planned.values() for edit in plan.edits}
-        source = {ref: read_stream(self.pdf, ref) for ref in streams}
-        undone = 0
-        while True:
-            for ref, instructions in source.items():
-                edits = [
-                    edit
-                    for number in sorted(planned)
-                    for edit in planned[number].edits
-                    if edit.stream == ref
-                ]
-                write_stream(self.pdf, ref, _apply(instructions, edits))
-            output = group_lines(trace_page(self.pdf.pages[index]))
-            result = check_boxes(lines, output, settings)
-            if result.passed or not planned:
-                break
-            failed = _failed_lines(result, set(planned))
-            undone += len(failed)
-            for number in failed:
-                del planned[number]
-                left["undone"] += replaced[number]
+        source: dict[StreamRef, list[Instruction]] = {}
+        refused: set[int] = set()
+        for attempt in range(1, PAGE_TRIES + 1):
+            replaced = {number: sum(plan.tiers.values()) for number, plan in planned.items()}
+            pinned = sum(plan.pinned for plan in planned.values())
+            streams = {edit.stream for plan in planned.values() for edit in plan.edits}
+            for ref in sorted(
+                streams, key=lambda ref: (ref.kind, ref.page_index, ref.objgen or ())
+            ):
+                # Every attempt starts from the source: a stream that it does not edit goes back.
+                source.setdefault(ref, read_stream(self.pdf, ref))
+            undone = 0
+            while True:
+                for ref, instructions in source.items():
+                    edits = [
+                        edit
+                        for number in sorted(planned)
+                        for edit in planned[number].edits
+                        if edit.stream == ref
+                    ]
+                    write_stream(self.pdf, ref, _apply(instructions, edits))
+                output = group_lines(trace_page(self.pdf.pages[index]))
+                result = check_boxes(lines, output, settings)
+                if result.passed or not planned:
+                    break
+                failed = _failed_lines(result, set(planned))
+                undone += len(failed)
+                # A violation that names no line says nothing about any line's word starts.
+                if len(failed) < len(planned):
+                    refused |= failed
+                for number in failed:
+                    del planned[number]
+                    left["undone"] += replaced[number]
 
-        tiers: Counter[Tier] = Counter()
-        for plan in planned.values():
-            tiers.update(plan.tiers)
-        report = FitReport(
-            sum(replaced[n] for n in planned),
-            dict(left),
-            undone,
-            result,
-            check_coverage(lines, output),
-            dict(tiers),
-            pinned,
-            dict(self.substituted),
-        )
-        if policy.coverage == "all" and not (report.coverage.passed and result.passed):
-            raise CoverageStop(index, report)
-        return report
+            tiers: Counter[Tier] = Counter()
+            for plan in planned.values():
+                tiers.update(plan.tiers)
+            report = FitReport(
+                sum(replaced[n] for n in planned),
+                dict(left),
+                undone,
+                result,
+                check_coverage(lines, output),
+                dict(tiers),
+                pinned,
+                dict(self.substituted),
+            )
+            if policy.coverage != "all" or (report.coverage.passed and result.passed):
+                return report
+            if attempt < PAGE_TRIES:
+                planned, left, _ = self._plan_page(
+                    index, lines, glyphs, settings, policy, f"{seed}/{attempt}", frozenset(refused)
+                )
+        raise CoverageStop(index, report)
 
     def _plan_page(
         self,
@@ -528,7 +554,8 @@ class WordFitter:
         glyphs: Sequence[Glyph],
         settings: BoxSettings,
         policy: FitPolicy,
-        seed: int,
+        seed: int | str,
+        pinned: frozenset[int] = frozenset(),
     ) -> tuple[dict[int, _LinePlan], Counter[LeftReason], list[Word]]:
         run = _Run(settings, policy, random.Random(f"{seed}:{index}"), Counter())
         order = {id(glyph): place for place, glyph in enumerate(glyphs)}
@@ -550,7 +577,7 @@ class WordFitter:
                     ),
                     None,
                 )
-            plan = self._plan_line(line, glyphs, order, run, leader)
+            plan = self._plan_line(line, glyphs, order, run, leader, number in pinned)
             if plan.tiers:
                 planned[number] = plan
         return planned, run.left, run.blocked
@@ -558,7 +585,7 @@ class WordFitter:
     def _extend_fonts(self, blocked: Sequence[Word]) -> bool:
         """Give a substitute to each font of a word that could not change. True if any did."""
         changed = False
-        for key in {glyph.font_key for word in blocked for glyph in word.glyphs}:
+        for key in sorted({glyph.font_key for word in blocked for glyph in word.glyphs}, key=str):
             if key in self.tried or not isinstance(key[0], int):
                 continue
             self.tried.add(key)
@@ -571,6 +598,7 @@ class WordFitter:
             except CannotSubstitute:
                 continue
             self.substituted[substitute.source_name] = substitute.name
+            self.replaced.add(key)
             factor = embedded.width_factor
             table = {
                 code: _Code(code, entry.width * factor, entry.text)
@@ -586,6 +614,34 @@ class WordFitter:
             changed = True
         return changed
 
+    def substitute_remaining(self) -> dict[str, str]:
+        """Give a substitute to every other font that the pages show, once they have changed.
+
+        A code with unknown text no longer blocks a font when no page shows it any more. A font
+        that cannot take a substitute keeps its program, which the caller reports. Returns the
+        fonts that have a substitute now: source name, substitute name.
+        """
+        if self.source is None:
+            return dict(self.substituted)
+        shown: dict[tuple[object, ...], dict[int, ShownCode]] = {}
+        for page in self.pdf.pages:
+            for glyph in trace_page(page):
+                shown.setdefault(glyph.font_key, {})[glyph.code] = ShownCode(
+                    glyph.length, glyph.text, glyph.width
+                )
+        for key, codes in shown.items():
+            if key in self.replaced or not isinstance(key[0], int):
+                continue
+            font = self.pdf.get_object(key)
+            substitute = self.source.pick(font)
+            if substitute is None:
+                continue
+            with contextlib.suppress(CannotSubstitute):
+                embed_substitute(self.pdf, font, substitute, codes)
+                self.replaced.add(key)
+                self.substituted[substitute.source_name] = substitute.name
+        return dict(self.substituted)
+
     def _by_text(self, key: tuple[object, ...]) -> Mapping[str, _Code]:
         return self.fonts[key].codes if key in self.fonts else {}
 
@@ -596,10 +652,15 @@ class WordFitter:
         order: Mapping[int, int],
         run: _Run,
         leader: _LinePlan | None,
+        pinned: bool = False,
     ) -> _LinePlan:
         words = line.words
         if run.policy.word_starts != "moved":
             return self._plan_pinned(words, None, run, leader, 0)
+        if pinned:
+            plan = self._plan_pinned(words, None, run, leader, 0)
+            plan.pinned = bool(plan.tiers)
+            return plan
         plan = _LinePlan([], Counter())
         for first, last in _stretches(words):
             part = words[first:last]
@@ -1115,7 +1176,8 @@ def _failed_lines(result: GeometryResult, planned: set[int]) -> set[int]:
     return (named & planned) or set(planned)
 
 
-def _draws_text(form: pikepdf.Stream, resources: pikepdf.Object | None, seen: frozenset) -> bool:
+def draws_text(form: pikepdf.Stream, resources: pikepdf.Object | None, seen: frozenset) -> bool:
+    """Whether a form shows text, or draws a form that does."""
     if form.objgen in seen:
         return False
     resources = form.get("/Resources", resources)
@@ -1129,7 +1191,7 @@ def _draws_text(form: pikepdf.Stream, resources: pikepdf.Object | None, seen: fr
             if (
                 isinstance(inner, pikepdf.Stream)
                 and inner.get("/Subtype") == "/Form"
-                and _draws_text(inner, resources, seen | {form.objgen})
+                and draws_text(inner, resources, seen | {form.objgen})
             ):
                 return True
     return False
@@ -1158,7 +1220,7 @@ def _own_forms(pdf: pikepdf.Pdf, page: pikepdf.Page) -> None:
             if (
                 not isinstance(form, pikepdf.Stream)
                 or form.get("/Subtype") != "/Form"
-                or not _draws_text(form, resources, frozenset())
+                or not draws_text(form, resources, frozenset())
             ):
                 rewritten.append(instruction)
                 continue

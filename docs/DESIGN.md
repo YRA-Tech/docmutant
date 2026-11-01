@@ -109,11 +109,29 @@ Apply a change that should not matter and check an invariant, for example:
 A violated invariant is a finding, and the file pair goes into the corpus with
 a `family` entry in its manifest.
 
-### 3.4 Anonymize (planned)
+### 3.4 Anonymize (built: `docmutant anonymize`)
 
-Replace selected content with plausible content of the same type and the same
-size, in every layer of the document (see 5.6). Used for training data and
-for privacy cleaning, under the `training` or `privacy` profile (see 4).
+Replace the content of a whole document, in every layer (see 5.6), under the
+`training` or `privacy` profile (see 4). Steps, in order:
+
+1. Refuse a page that cannot be traced or, under `privacy`, that may show text as
+   outlines.
+2. Fit new words on every page (see 5.3).
+3. Under `privacy`: give every font a substitute and replace every image.
+4. Clean the hidden layers (see 5.6).
+5. Save, open the saved bytes again, and run every oracle on them (see 5.8).
+
+If an oracle that the profile requires fails, there is no output file: a reason
+for each failure goes to the user, and only there, since it can quote the source.
+The same seed gives the same bytes.
+
+A run takes the whole document. A run on some pages would leave the other pages
+reachable through tags and links, and the text of the source with them.
+
+Replacement is not yet of the same type (a name for a name): that takes semantic
+selection (see 5.7). `--vocabulary` names a file of real words; without one, every
+word is invented. `--keep-images` and `--keep-drawings` go on with what no oracle
+reads, and the file then has no `privacy` claim.
 
 ## 4. Profiles: what each use keeps
 
@@ -147,7 +165,7 @@ profile, and only at the level that the user asks for.
 | Geometry | exact where the oracle needs it; the rest is removed | exact, except the one variable under test | exact, except words moved inside a held line (see 4.4) | as `training`; rounding is an opt-in level |
 | Text | equal-width swap | changed only as the family says | changed; labels updated with it | every word replaced (see 4.4) |
 | Glyph shapes | removed unless the oracle needs them | exact | exact, or a metric-compatible substitute | substitute |
-| Image samples | flat grey or noise | exact | exact, or a content-aware replacement | replaced by image class |
+| Image samples | flat grey or noise | exact | exact, or a content-aware replacement | flat and light; by image class is planned |
 | Image geometry | exact | exact | exact | exact |
 | Structure | removed unless the oracle needs it | exact | exact | exact; values cleaned |
 | Serialization | not changed on purpose (qpdf rewrites it) | exact | any | normalized at the chosen level; reported |
@@ -551,6 +569,14 @@ Planned, in order:
   fonts. This also removes the source's font program, which the copyright and
   privacy claims need, but so far only for the fonts that needed more glyphs.
 
+A page under coverage `all` gets four attempts, each with other words, because whether
+a tight line has room for its last word depends on the words before it. A line that
+the geometry oracle refuses keeps its word starts in the next attempt: the words of a
+formula lie too close to move. A substitute draws a math letter as its plain letter.
+A symbol that it lacks, or a code whose text is not known, draws nothing and keeps its
+advance. A letter that it lacks refuses the substitute, so that a font of another
+script does not lose its text.
+
 ### 5.4 Images (built, basic)
 
 Samples are replaced at the same geometry. Planned: choose the treatment by
@@ -558,31 +584,82 @@ the image's class (logo, signature, photo, chart, scanned text) from Docling's
 picture classification; for scanned text, replace the text in the image, not
 only the pixels.
 
+Under `privacy`, every image becomes flat and light at the same size, depth and colour
+space, and a mask becomes empty: its shape can show a logo or a signature, and an image
+that was see-through in places must not become a block that hides the text under it.
+The fill depends on the colour space, because a sample counts ink in CMYK, where the
+number that is mid-grey in RGB is close to black.
+
 ### 5.5 Vector graphics
 
-The reduce mode keeps the paths that the oracle needs, exactly. In the
-anonymize mode, recognisable illustrations that no oracle needs can be
-distorted (as pdf-mangler does) or removed.
+The reduce mode keeps the paths that the oracle needs, exactly. The anonymize mode
+keeps paths too, because the profiles hold their coordinates, and no oracle reads
+what they show. That is a real gap: a logo, a signature or a QR code can be a path,
+and some producers draw all text as outlines, which the tracker cannot see. On such
+a page every check of the words passes without having looked at anything.
 
-### 5.6 Hidden layers (planned)
+So `privacy` counts the curved shapes that each page fills (`curved_fills`) and stops
+above 100. On the sample, pages of outlined text hold 120 to 2,845 and no glyphs, two
+pages with logos hold 140 and 172, and every other page holds at most 35. The count
+says that someone must look, not what is there. A drawing under the limit stays, and
+the manifest says so: on the sample, a data sheet keeps its logo and a QR code, which
+only a reviewer catches.
 
-Text lives in more places than the content stream. The anonymize mode must
-change every one of them, consistently with the visible text, and keep the
-document's tags valid:
+Planned: distort or remove recognisable illustrations (as pdf-mangler does), which
+would let such pages go on. It is also what a page of outlined text needs.
 
-| Layer | Where |
-|---|---|
-| Structure tree | `/Alt`, `/ActualText`, `/E`, `/T`, `/Lang` of structure elements |
-| Forms | field values `/V`, defaults `/DV`, tooltips `/TU`, appearance streams |
-| Annotations | `/Contents`, `/RC`, popups, appearance streams |
-| Navigation | outlines, page labels, named destinations |
-| Metadata | document info, XMP, per-object `/Metadata` |
-| Other | embedded files, JavaScript, optional-content group names, thumbnails |
+### 5.6 Hidden layers (built: `layers.py`)
 
-Keeping the tags valid means that a cleaned file from a tagged source stays as
-conformant (for example to PDF/UA) as it was.
+Text lives in more places than the content stream. Producers add private keys that
+no list can know (Acrobat Capture's `/CAPT_Info` holds a file path), so the cleaner
+denies by default. It walks everything reachable from the trailer, and:
 
-### 5.7 Semantic selection (planned)
+- rewrites any string not known to be data. Only `/DA`, `/Registry`, `/Ordering`,
+  `/Lang`, `/Panose` and an indexed colour table are known to be data;
+- removes any stream not known to be part of drawing a page;
+- keeps only the listed keys of the catalog and of each page.
+
+| Layer | Where | What happens |
+|---|---|---|
+| Structure tree | `/Alt`, `/E`, `/T`, `/ID` of structure elements | rewritten |
+| | `/ActualText` | removed: a rewritten one would not match the glyphs, which then speak for themselves |
+| | custom role names (a role name can hold text) | replaced by the standard role that they map to |
+| Forms | field values `/V`, `/DV`, tooltips `/TU`, names `/T`, options | rewritten |
+| | check boxes, radio buttons, chosen indexes, signatures | cleared: what a person chose or signed |
+| | XFA | removed |
+| Annotations | `/Contents`, `/T`, `/Subj` | rewritten |
+| | `/RC`, `/M`, appearance streams that show text | removed; a widget asks for a new appearance |
+| | files, stamps, sounds, handwriting and other media | the annotation is removed, and the tags let go of it |
+| Navigation | outline titles, page label prefixes | rewritten |
+| | named destinations (`cite.smith2018`) | resolved to their page |
+| | web addresses, scripts and other actions | removed |
+| Metadata | document info, XMP, `/PieceInfo`, thumbnails, dates, file identifier | removed |
+| Other | embedded files, JavaScript, marked content properties (see 3.1) | removed |
+| | optional-content group names | `Layer N` |
+
+A rewritten string keeps its shape: letters stay letters and digits stay digits. The
+same string always becomes the same string, so that a form value still matches its
+options and a table header still matches its cell. It uses no word of the source, in
+any layer.
+
+The tag tree keeps its shape and its marked-content IDs, which an oracle checks.
+That does not make the file conform to what its source did: the XMP that declares
+PDF/UA or PDF/A goes with the rest, since no validator has checked the output, and a
+file should not claim what nothing has checked.
+
+The manifest does not name the source's file, which can name a person. It does hold
+the source's hash, because a derived file must name its source: whoever holds both
+files can link them.
+
+Names are not rewritten: a font's name, or a check box's state, can still say
+something. The fingerprint report lists the fonts that stay.
+
+### 5.7 Semantic selection (planned; not needed for coverage `all`)
+
+When every word changes, nothing depends on finding what is sensitive, so the
+`privacy` profile does not need this. It matters for realistic output (a name for a
+name, a date for a date), for `training`, and for any future mode that changes only
+what is sensitive, where a miss is a leak.
 
 1. Convert the document with Docling (optional `docling` extra).
 2. Map each item (text, heading, table cell, key-value pair, form field,
@@ -605,15 +682,25 @@ region and every text region that stayed, with the detector's confidence.
 | Oracle | Status |
 |---|---|
 | crash (signal), hang (timeout), error (nonzero exit) | built |
-| geometry: the word and line box settings of 4.4 (`geometry.py`); run by fitted replacement, not yet by a mode | built |
-| coverage: every word in scope changed, by the tracker's words (`coverage.py`); run by fitted replacement, not yet by a mode | built |
+| geometry: the word and line box settings of 4.4 (`geometry.py`) | built |
+| coverage: every word in scope changed, by the tracker's words (`coverage.py`) | built |
 | residual text: the words of the source that pdfium still reads on the page (`coverage.py`), which shares no code with the tracker | built |
-| other layers: text no replacement has reached, by layer, and a count of images (`coverage.py`) | built; the layers themselves are 5.6 |
+| hidden text: no word of the source, in any layer, in any string of the output (`layers.py`) | built |
+| other layers: what must be gone is gone, including forms with text that no page draws and text in patterns (`layers.py`) | built |
+| file identifier: not the source's | built |
+| structure: the tag tree has the same shape and the same marked-content IDs | built |
+| image geometry: each page draws images of the same sizes and depths. The filter can change, under `privacy`: a flat image is Flate | built |
+| drawn text: no page has so many curved shapes that it may show text as outlines (see 5.5) | built |
 | render difference against a second engine (pypdfium2 by default), with per-page `mean_abs_error` and `changed_pixels_ratio` | planned |
 | text-cell difference between two runs or two engines | planned |
 | invariant check for metamorphic families | planned |
 
-Every oracle runs the target in a child process. A target is any command with
+The anonymize mode runs the oracles above on the saved bytes, not on the file in
+memory. **They do not read pictures.** On the sample they all passed a page that a
+flat image had turned black, and one where a word crossed a table border. Only the
+render difference can catch that. Until it exists, someone must look at the output.
+
+The command oracles run the target in a child process. A target is any command with
 `{pdf}` and `{page}` placeholders, so Java, Rust and C++ tools work as well as
 Python ones.
 
@@ -625,25 +712,31 @@ distance, and a count of the remaining units by kind. Planned: SSIM, n-gram
 overlap, region crops for reverse image search with the original as a positive
 control, and a side-by-side render for the reviewer.
 
-### 5.10 Manifest and claims (built: schema 0.1)
+### 5.10 Manifest and claims (built: schema 0.2)
 
 The manifest records tier, source, fonts, mutations, generator, oracle results,
 family, evidence, attestation and takedown contact, and enforces the corpus
 policy (see `CORPUS-LICENSES.md`). Schema 0.2 adds:
 
-- `claims`: a list of `copyright`, `training` and `privacy`, each with its own
-  required evidence and attestation statement;
-- `profile`, with `preserved` (each kept signal and its oracle result) and
+- `claims`: a list of `copyright`, `training` and `privacy`. A `privacy` claim needs
+  the `privacy` profile, every oracle of 5.8 that the mode runs, a fingerprint report,
+  evidence and a reviewer's privacy statement. A `training` claim is refused until
+  there is a labels oracle;
+- `profile`, with `settings`, `preserved` (each kept signal and its oracle) and
   `changed` (each changed signal and its mutators);
-- `fingerprint` (`privacy` only): the normalization level and the fingerprint
-  report.
+- `fingerprint` (`privacy` only): the normalization level, which is 0 for now, and
+  the fingerprint report: page sizes, image sizes, the number of distinct transforms
+  and painted paths, and the fonts that stay.
+
+A manifest from the anonymize mode is a draft until a reviewer attests. A font
+program that stays, from a source that may not be redistributed, breaks the corpus
+policy, so that draft cannot be attested.
 
 ### 5.11 Attestation
 
 A claim that needs judgment needs a named reviewer, a checklist version and a
 statement version (`docs/ATTESTATION.md`). The copyright statement exists as a
-draft. A privacy statement ("personal data removed under policy X") follows the
-same pattern. CI refuses corpus files whose claims lack the required review.
+draft, and so does the privacy statement. CI refuses corpus files whose claims lack the required review.
 
 ## 6. Interfaces (sketch)
 
@@ -695,10 +788,11 @@ and Caladea). No dependency's code is copied into docmutant's files.
 |---|---|---|
 | M1 | Manifest, policy validation, CLI | done |
 | M2 | Reduce mode for rendering bugs, crash/hang oracles, basic evidence | built; first real-document runs in progress |
-| M3 | Text-position tracker; render-difference oracle; geometry (with the settings of 4.4) and image-geometry preservation oracles | next |
+| M3 | Text-position tracker; render-difference oracle; geometry (with the settings of 4.4) and image-geometry preservation oracles | built, except the render-difference oracle, which is next |
 | M4 | Font glyph availability and metric-compatible substitution | substitution built for fonts that need more glyphs; glyph availability from the font program next |
-| M5 | Hidden layers; anonymize mode with Docling selection; profiles; privacy normalization levels and fingerprint report; schema 0.2 | |
+| M5 | Hidden layers; anonymize mode; profiles; fingerprint report; schema 0.2 | built; privacy normalization levels 1 and 2 are not |
 | M6 | Fuzz and metamorphic modes; corpus packaging | |
+| M7 | Semantic selection with Docling and a PII detector; replacement by type | |
 
 ## 10. Open questions
 
@@ -715,6 +809,10 @@ and Caladea). No dependency's code is copied into docmutant's files.
   tracker with each glyph until the next positioning operator.
 - How much tracking stays invisible. The default of 0.02 em per gap is an
   estimate; the render-difference oracle should test it.
+- What to do with drawings. A page over the limit for curved shapes stops today, so
+  whole documents of outlined text cannot be cleaned. Removing or distorting the
+  shapes would let them go on, but changes path coordinates, which the profiles hold.
+- Whether 100 curved shapes is the right limit. It comes from 12 files.
 - How wide a gap counts as structure. The 0.75 em for holding a gap under word
   starts `moved` is an estimate: a justified word space can come close to it, and
   table cells can be closer.
