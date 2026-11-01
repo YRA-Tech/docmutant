@@ -463,7 +463,8 @@ def test_an_inline_image_is_replaced_at_its_size():
     )
     image = instruction.iimage
     assert (int(image.obj.Width), int(image.obj.Height)) == (2, 2)
-    assert image.read_raw_bytes().rstrip() == b"\x00" * 16
+    written = pikepdf.unparse_content_stream([instruction])
+    assert b"ID " + b"\x00" * 16 + b" EI" in written.replace(b"\n", b" ")
 
 
 def test_a_full_run_passes_every_check_on_the_saved_bytes_and_says_so():
