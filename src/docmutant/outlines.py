@@ -98,7 +98,7 @@ _STATE = frozenset(
 """What a group holds when it paints nothing."""
 
 
-def _multiply(first: Matrix, second: Matrix) -> Matrix:
+def multiply(first: Matrix, second: Matrix) -> Matrix:
     a, b, c, d, e, f = first
     g, h, i, j, k, m = second
     return (
@@ -111,7 +111,7 @@ def _multiply(first: Matrix, second: Matrix) -> Matrix:
     )
 
 
-def _inverse(matrix: Matrix) -> Matrix | None:
+def inverse_matrix(matrix: Matrix) -> Matrix | None:
     a, b, c, d, e, f = matrix
     det = a * d - b * c
     if det == 0:
@@ -131,7 +131,7 @@ def _rotation(turn: int) -> Matrix:
     return (cos, sin, -sin, cos, 0.0, 0.0)
 
 
-def _apply(matrix: Matrix, x: float, y: float) -> tuple[float, float]:
+def apply_matrix(matrix: Matrix, x: float, y: float) -> tuple[float, float]:
     a, b, c, d, e, f = matrix
     return a * x + c * y + e, b * x + d * y + f
 
@@ -251,7 +251,7 @@ def _items(instructions: Sequence[Instruction], unit: float) -> list[_Item]:
                 ctm, colour = stack.pop()
         elif operator == "cm":
             matrix = tuple(float(value) for value in instruction.operands)
-            ctm = _multiply(matrix, ctm)
+            ctm = multiply(matrix, ctm)
         elif operator in _COLOURS:
             # A colour in a named space needs the operator that chose the space.
             space = colour[:1] if operator in ("sc", "scn") else ()
@@ -284,11 +284,11 @@ def _measure(
     curves: int,
     subpaths: int,
 ) -> _Shape | None:
-    if _inverse(ctm) is None:
+    if inverse_matrix(ctm) is None:
         return None
     turn = round(math.degrees(math.atan2(ctm[1], ctm[0]))) % 360
     back = _rotation(-turn)
-    placed = [_apply(back, *_apply(ctm, x, y)) for x, y in points]
+    placed = [apply_matrix(back, *apply_matrix(ctm, x, y)) for x, y in points]
     xs, ys = zip(*placed, strict=True)
     box = (min(xs), min(ys), max(xs), max(ys))
     return _Shape(drops, paint, box, turn, colour, curves, subpaths, len(points))
@@ -321,7 +321,7 @@ def _scales(pdf: pikepdf.Pdf) -> dict[tuple[int, int], float]:
                 if stack:
                     ctm = stack.pop()
             elif operator == "cm":
-                ctm = _multiply(tuple(float(value) for value in instruction.operands), ctm)
+                ctm = multiply(tuple(float(value) for value in instruction.operands), ctm)
             elif operator == "Do" and xobjects is not None:
                 form = xobjects.get(instruction.operands[0])
                 if (
@@ -330,7 +330,7 @@ def _scales(pdf: pikepdf.Pdf) -> dict[tuple[int, int], float]:
                     and form.objgen not in scales
                 ):
                     matrix = tuple(float(value) for value in form.get("/Matrix", _IDENTITY))
-                    placed = _multiply(matrix, ctm)
+                    placed = multiply(matrix, ctm)
                     scales[form.objgen] = math.sqrt(
                         abs(placed[0] * placed[3] - placed[1] * placed[2])
                     )
@@ -341,7 +341,7 @@ def _scales(pdf: pikepdf.Pdf) -> dict[tuple[int, int], float]:
     return scales
 
 
-def _streams(pdf: pikepdf.Pdf) -> Iterator[tuple[StreamRef, float]]:
+def drawing_streams(pdf: pikepdf.Pdf) -> Iterator[tuple[StreamRef, float]]:
     """Each stream that can hold an outline item. A glyph's own procedure belongs to its font."""
     scales = _scales(pdf)
     for ref in content_streams(pdf):
@@ -352,7 +352,7 @@ def _streams(pdf: pikepdf.Pdf) -> Iterator[tuple[StreamRef, float]]:
 def outline_items(pdf: pikepdf.Pdf) -> dict[str, int]:
     """How many outline items each content stream holds. Streams with none are not listed."""
     found: dict[str, int] = {}
-    for ref, unit in _streams(pdf):
+    for ref, unit in drawing_streams(pdf):
         count = len(_items(read_stream(pdf, ref), unit))
         if count:
             found[ref.label()] = count
@@ -441,7 +441,7 @@ def _paragraph(item: _Item, font: _Font, words: _Words, inverse: Matrix) -> list
     text = words.line(round(width / (ADVANCE * size)) if size > 0 else 1)
     data, natural = font.encode(text)
     stretch = 100 * width / (natural * size) if natural > 0 and size > 0 else 100
-    origin = _apply(_rotation(first.turn), x0, y0 + DESCENT * size)
+    origin = apply_matrix(_rotation(first.turn), x0, y0 + DESCENT * size)
     placed = (*_rotation(first.turn)[:4], *origin)
     return [
         _instruction("q"),
@@ -454,7 +454,7 @@ def _paragraph(item: _Item, font: _Font, words: _Words, inverse: Matrix) -> list
         _instruction("Tw", 0),
         _instruction("Ts", 0),
         _instruction("Tr", 0),
-        _instruction("Tm", *_multiply(placed, inverse)),
+        _instruction("Tm", *multiply(placed, inverse)),
         _instruction("Tj", pikepdf.String(data)),
         _instruction("ET"),
         _instruction("EMC"),
@@ -462,7 +462,7 @@ def _paragraph(item: _Item, font: _Font, words: _Words, inverse: Matrix) -> list
     ]
 
 
-def _without_empty_groups(instructions: Sequence[Instruction]) -> list[Instruction]:
+def without_empty_groups(instructions: Sequence[Instruction]) -> list[Instruction]:
     """Drop each group that paints nothing, and with it the place that it recorded.
 
     A ``BDC`` stays, because structure can point at its marked content, and so does what holds
@@ -509,7 +509,7 @@ def _placed(
     for instruction in instructions:
         operator = operator_name(instruction)
         if operator == _PLACE:
-            inverse = _inverse(ctm)
+            inverse = inverse_matrix(ctm)
             if inverse is None:
                 raise CannotSubstitute("a paragraph's place has a transform that cannot be undone")
             output.extend(_instruction("Q") for _ in frames)
@@ -525,7 +525,7 @@ def _placed(
             if frames:
                 frames.pop()
         elif operator == "cm" and not frames:
-            ctm = _multiply(tuple(float(value) for value in instruction.operands), ctm)
+            ctm = multiply(tuple(float(value) for value in instruction.operands), ctm)
         elif operator in _PATH or operator in ("W", "W*"):
             path.append(instruction)
         elif operator == "n":
@@ -551,7 +551,7 @@ def text_from_outlines(
     words = _Words(seed, vocabulary, avoid)
     font: _Font | None = None
     paragraphs: dict[str, int] = {}
-    for ref, unit in _streams(pdf):
+    for ref, unit in drawing_streams(pdf):
         instructions = read_stream(pdf, ref)
         items = _items(instructions, unit)
         resources = _resources(pdf, ref) if items else None
@@ -572,7 +572,7 @@ def text_from_outlines(
                 marked.append(_instruction(_PLACE, last[index]))
             elif index not in gone:
                 marked.append(entry)
-        placed = _placed(_without_empty_groups(marked), items, font, words)
-        write_stream(pdf, ref, _without_empty_groups(placed))
+        placed = _placed(without_empty_groups(marked), items, font, words)
+        write_stream(pdf, ref, without_empty_groups(placed))
         paragraphs[ref.label()] = len(items)
     return OutlineReport(sum(paragraphs.values()), paragraphs)

@@ -48,3 +48,4 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["real_reader: runs Tesseract rather than the stub reader; skipped if it is not installed"]

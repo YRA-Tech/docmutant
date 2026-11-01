@@ -42,6 +42,8 @@ PRIVACY_ORACLES = frozenset(
         "structure",
         "image-geometry",
         "drawn-text",
+        "machine-codes",
+        "readable-text",
     }
 )
 PRIVACY_STATEMENT = "privacy-"

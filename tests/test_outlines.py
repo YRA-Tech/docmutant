@@ -379,7 +379,7 @@ def _shapes(data: bytes) -> list[str]:
 
 def test_the_training_profile_keeps_outlines_exact():
     profile = resolve_profile("training")
-    assert not profile.text_from_outlines
+    assert not profile.replace_drawings
     pdf = _source(extra=_word(y=500))
     before = _shapes(_bytes(pdf))
     result = anonymize(_bytes(pdf), profile, fonts=_Boxes())
@@ -393,7 +393,7 @@ def test_the_training_profile_keeps_outlines_exact():
 
 def test_keeping_drawings_under_privacy_keeps_outlines_and_gives_up_the_claim():
     profile = _privacy(keep_drawings=True)
-    assert not profile.text_from_outlines
+    assert not profile.replace_drawings
     assert profile.claims == ()
     result = anonymize(_bytes(_source(extra=_word(y=500))), profile, fonts=_Boxes())
     assert result.data is not None, result.problems

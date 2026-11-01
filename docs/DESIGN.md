@@ -116,8 +116,9 @@ Replace the content of a whole document, in every layer (see 5.6), under the
 
 1. Refuse a page that cannot be traced.
 2. Fit new words on every page (see 5.3).
-3. Under `privacy`: give every font a substitute, turn text drawn as outlines into
-   paragraphs of new text (see 5.5) and replace every image.
+3. Under `privacy`: give every font a substitute, turn machine-readable codes into
+   flat blocks and text drawn as outlines into paragraphs of new text (see 5.5), and
+   replace every image.
 4. Clean the hidden layers (see 5.6).
 5. Save, open the saved bytes again, and run every oracle on them (see 5.8).
 
@@ -130,9 +131,14 @@ reachable through tags and links, and the text of the source with them.
 
 Replacement is not yet of the same type (a name for a name): that takes semantic
 selection (see 5.7). `--vocabulary` names a file of real words; without one, every
-word is invented. `--keep-images` and `--keep-drawings` keep what no oracle reads,
-and the file then has no `privacy` claim. `--keep-drawings` keeps outlines exact,
-which is what `training` always does.
+word is invented. `--keep-images` and `--keep-drawings` keep what would stop the
+claim, and the file then has no `privacy` claim and no reading of its render.
+`--keep-drawings` keeps outlines and codes exact, which is what `training` always
+does.
+
+A `privacy` run needs Tesseract, to read the rendered pages (see 5.5). Without it the
+run stops, because a check that did not look must not pass. The output's bytes depend
+on its version too, because what it reads in the source joins the words to avoid.
 
 ## 4. Profiles: what each use keeps
 
@@ -634,10 +640,41 @@ What stays, and the oracle `drawn-text` runs on the saved file:
   large to be glyphs. The count says that someone must look, not what is there.
 - A lone glyph stays, because it spells little and a bullet looks like one.
 - A logo of several colours can stay in part: on the sample, a shield and a red X.
-- A QR code stays if it is drawn in boxes. Curves drawn with strokes, such as a
-  signature, stay. So does text used as a clip for a picture.
+- Curves drawn with strokes, such as a signature, stay. So does text used as a clip
+  for a picture.
 
 The manifest counts the paths that remain, and only a reviewer can say what they show.
+
+**Machine-readable codes** (`codes.py`). A code stays readable when every word around
+it has changed, and it can hold a URL or an ID, while OCR does not read one. It is
+recognizable by what draws it: filled boxes of one colour, at least 15 of them and close
+together, whose sides are whole multiples of one module of at most 8 pt. A matrix (a QR
+code or a Data Matrix) is nearly square, at least 18 modules wide and 25 to 75% ink, with
+its boxes on the module's grid. A barcode has bars of one height, at least 3 times as
+tall as its widest bar, with bars and gaps of at most 6 modules. Each becomes a flat, light
+block of the same size, and the oracle `machine-codes` looks for any left on the saved
+file. On the sample this finds the one QR code, which still decoded in an earlier
+output that had passed every other check, and nothing else, among tables and charts.
+It does not find a code of round dots, which is an outline item instead; a skewed code; or
+one in several colours. A code in an image goes with the image.
+
+**Reading the render** (`reading.py`). Every other oracle reads the file's operators and
+objects, so what they cannot see they pass, and three times a page has passed them with
+source text in plain view. The oracle `readable-text` looks at the picture instead: it
+reads the rendered pages of source and output through Tesseract, at 216 dpi, and stops
+if a word of 4 letters or more:
+
+- is a word of the source, anywhere in the document, from either the reader or the file;
+- or is at least 80% part of a word that the reader saw at the same place in the source.
+  This is what is left of a word when only some letters changed. A fragment elsewhere
+  is chance, and common in new words, but layout holds, so here it is not.
+
+A reader that sees nothing where the pages show at least 20 words also stops the run, so
+that a broken one, or a blank output, cannot pass. Words stay out of the manifest, as
+everywhere: only their counts go in.
+
+Passing is evidence, not proof. OCR misses small and stylized text and words of under 4
+letters, and it cannot tell a logo from a drawing, so review stays.
 
 ### 5.6 Hidden layers (built: `layers.py`)
 
@@ -722,6 +759,8 @@ region and every text region that stayed, with the detector's confidence.
 | structure: the tag tree has the same shape and the same marked-content IDs | built |
 | image geometry: each page draws images of the same sizes and depths. The filter can change, under `privacy`: a flat image is Flate | built |
 | drawn text: no outline item is left, and no page keeps so many curved shapes that someone should look (see 5.5) | built |
+| machine codes: no QR code, Data Matrix or barcode drawn as paths is left (see 5.5) | built |
+| readable text: OCR of the render reads no source word in the output, and has read something (see 5.5) | built |
 | render difference against a second engine (pypdfium2 by default), with per-page `mean_abs_error` and `changed_pixels_ratio` | planned |
 | text-cell difference between two runs or two engines | planned |
 | invariant check for metamorphic families | planned |
@@ -845,6 +884,11 @@ and Caladea). No dependency's code is copied into docmutant's files.
 - Whether 100 curved shapes is still the right limit. It comes from the same files, and
   now counts only what is too large to be a glyph.
 - Whether paragraphs should hold a font's weight. All of them are one regular font.
+- How much of a leak reading the render misses. On the 3 sample files with outlined text, it
+  reads a leak in proportion to what stays, but short words and small print can go unread.
+- Whether to read languages other than English. Tesseract runs with its default model,
+  which reads other Latin scripts less well and other scripts not at all.
+- What else could count as a code, such as a PDF417 stack of unequal rows.
 - How wide a gap counts as structure. The 0.75 em for holding a gap under word
   starts `moved` is an estimate: a justified word space can come close to it, and
   table cells can be closer.

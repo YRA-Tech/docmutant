@@ -54,8 +54,8 @@ personal.
 
 1. In the render, no word of the source can be read, anywhere on any page.
 2. Every drawing that stays shows nothing personal or identifying: no logo, signature,
-   QR code or text drawn as outlines. The evidence counts them; only a person can say
-   what they show.
+   machine-readable code or text drawn as outlines. The evidence counts them; only a
+   person can say what they show. Reading the render finds words, not these.
 3. Every image is flat, as the manifest says.
 4. The values in the fingerprint report (page sizes, image sizes, fonts that stay) do
    not point to one source, given who will receive the file.

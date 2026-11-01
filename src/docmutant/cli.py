@@ -198,8 +198,10 @@ def _manifest_draft(args: argparse.Namespace, profile: Any, result: Any) -> dict
         {"signal": "text", "mutators": ["fit-words"]},
         {"signal": "hidden text", "mutators": ["clean-layers"]},
     ]
-    if profile.text_from_outlines:
-        changed.append({"signal": "drawn text", "mutators": ["text-from-outlines"]})
+    if profile.replace_drawings:
+        changed.append(
+            {"signal": "drawn text", "mutators": ["text-from-outlines", "replace-machine-codes"]}
+        )
     if profile.substitute_fonts:
         changed.append({"signal": "glyph shapes", "mutators": ["substitute-fonts"]})
     if profile.replace_images:
@@ -452,7 +454,7 @@ def main(argv: list[str] | None = None) -> int:
     anonymize.add_argument(
         "--keep-drawings",
         action="store_true",
-        help="keep text drawn as outlines, instead of new text: the file then has no privacy claim",
+        help="keep outlines and codes drawn as paths: the file then has no privacy claim",
     )
     anonymize.add_argument("--seed", type=int, default=0)
     anonymize.add_argument("--source-url")

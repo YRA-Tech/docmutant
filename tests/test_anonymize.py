@@ -486,6 +486,8 @@ def test_a_full_run_passes_every_check_on_the_saved_bytes_and_says_so():
         "structure",
         "image-geometry",
         "drawn-text",
+        "machine-codes",
+        "readable-text",
     }
     assert all(check.passed for check in result.checks)
     assert result.metrics["words_in_scope"] == result.metrics["words_changed"] > 0

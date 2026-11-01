@@ -39,8 +39,10 @@ Pre-alpha. Built so far: the manifest model with its policy checks, a
 validator, a first reduce/sanitize mode for rendering bugs with crash, hang and
 error oracles that run docling-parse, and an anonymize mode that changes every
 word and every hidden layer of a document, turns text drawn as outlines into new
-text under its privacy profile, and writes nothing unless the saved file passes its
-checks. See [docs/DESIGN.md](docs/DESIGN.md) for the design and
+text and machine-readable codes into flat blocks under its privacy profile, and
+writes nothing unless the saved file passes its checks, which include reading the
+rendered pages. The privacy profile needs [Tesseract](https://github.com/tesseract-ocr/tesseract)
+on the path. See [docs/DESIGN.md](docs/DESIGN.md) for the design and
 the roadmap.
 
 ```console

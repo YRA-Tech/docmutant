@@ -22,6 +22,8 @@ from typing import Any
 import pikepdf
 import pypdfium2
 
+from docmutant import reading
+from docmutant.codes import machine_codes, replace_machine_codes
 from docmutant.content import Instruction, operator_name
 from docmutant.coverage import (
     DRAWN_TEXT,
@@ -53,6 +55,9 @@ from docmutant.outlines import FONT_PREFIX, outline_items, text_from_outlines
 from docmutant.substitute import CannotSubstitute, FontSource
 from docmutant.tracker import Glyph, Line, UnsupportedText, group_lines, trace_page
 
+SOME_TEXT = 20
+"""Words or paragraphs: with this many, a reader that saw nothing must have gone wrong."""
+
 
 @dataclass(frozen=True)
 class Profile:
@@ -67,8 +72,11 @@ class Profile:
     requires_coverage: bool
     """Whether a word left, or a word that pdfium still reads, stops the run."""
 
-    text_from_outlines: bool = False
-    """Whether what the pages draw as glyph shapes becomes new text. Otherwise it stays exact."""
+    replace_drawings: bool = False
+    """Whether glyph shapes become new text, and machine-readable codes flat blocks."""
+
+    reads_render: bool = False
+    """Whether source words that a person could read in the rendered output stop the run."""
 
 
 PROFILES = {
@@ -80,7 +88,8 @@ PROFILES = {
         replace_images=True,
         claims=("privacy",),
         requires_coverage=True,
-        text_from_outlines=True,
+        replace_drawings=True,
+        reads_render=True,
     ),
     "training": Profile(
         "training",
@@ -126,7 +135,8 @@ def resolve_profile(
         settings=settings,
         policy=policy,
         replace_images=profile.replace_images and not keep_images,
-        text_from_outlines=profile.text_from_outlines and not keep_drawings,
+        replace_drawings=profile.replace_drawings and not keep_drawings,
+        reads_render=profile.reads_render and not (keep_images or keep_drawings),
         claims=() if keep_images or keep_drawings else profile.claims,
         requires_coverage=profile.requires_coverage or policy.coverage == "all",
     )
@@ -512,6 +522,44 @@ def _check_output(
     return checks, problems, output, metrics
 
 
+def _check_render(
+    source_read: Sequence[Sequence[reading.ReadWord]],
+    data: bytes,
+    known: Iterable[str],
+    reader: reading.Reader,
+    metrics: Mapping[str, float],
+    paragraphs: int,
+) -> tuple[Check, list[str]]:
+    """Read the saved file's pages. A reader that saw nothing where there is text has not looked."""
+    try:
+        output_read = reading.read_pages(data, reader)
+    except reading.CannotRead as error:
+        return Check("readable-text", reader.name, False), [str(error)]
+    found = reading.readable(source_read, output_read, known)
+    source_words = sum(len(reading.tokens(page)) for page in source_read)
+    output_words = sum(len(reading.tokens(page)) for page in output_read)
+    problems = [
+        f"page {index + 1}: can still be read: {', '.join(words[:5])}"
+        for index, words in sorted(found.items())
+    ]
+    if metrics["words_in_scope"] + paragraphs >= SOME_TEXT and not (source_words and output_words):
+        problems.append(
+            f"the reader saw {source_words} words of the source and {output_words} of the output, "
+            "though the pages show text, so this check has not looked"
+        )
+    check = Check(
+        "readable-text",
+        reader.name,
+        not problems,
+        {
+            "source_words": source_words,
+            "output_words": output_words,
+            "matches": sum(len(words) for words in found.values()),
+        },
+    )
+    return check, problems
+
+
 def anonymize(
     source: bytes,
     profile: Profile,
@@ -519,6 +567,7 @@ def anonymize(
     vocabulary: Iterable[str] = (),
     fonts: FontSource | None = None,
     seed: int = 0,
+    reader: reading.Reader | None = None,
 ) -> Result:
     """Change a copy of ``source`` under ``profile``. See the module's description."""
     original = pikepdf.open(io.BytesIO(source))
@@ -535,6 +584,16 @@ def anonymize(
             problems.append(f"page {index + 1}: the text cannot be traced: {error}")
     if problems:
         return Result(None, tuple(problems), pages=len(original.pages))
+
+    source_read: list[list[reading.ReadWord]] = []
+    if profile.reads_render:
+        try:
+            reader = reader or reading.default_reader()
+            source_read = reading.read_pages(source, reader)
+        except reading.CannotRead as error:
+            return Result(None, (str(error),), pages=len(original.pages))
+        # An outlined page gives the fitter no words, so new ones could match them by chance.
+        avoid = avoid | {token for page in source_read for token, _ in reading.tokens(page)}
 
     fitter = WordFitter(pdf, vocabulary, fonts if profile.policy.coverage == "all" else None, avoid)
     tiers: Counter[str] = Counter()
@@ -569,8 +628,10 @@ def anonymize(
         mutations.append({"operator": "substitute-fonts", "params": {"fonts": len(substituted)}})
     else:
         substituted = dict(fitter.substituted)
-    paragraphs = 0
-    if profile.text_from_outlines:
+    paragraphs = codes = 0
+    if profile.replace_drawings:
+        codes = replace_machine_codes(pdf)
+        mutations.append({"operator": "replace-machine-codes", "params": {"codes": codes}})
         try:
             outlines = text_from_outlines(
                 pdf,
@@ -606,7 +667,7 @@ def anonymize(
         profile, original, source, data, source_lines, avoid | fitter.source_words
     )
     drawings = {index: curved_fills(page) for index, page in enumerate(output.pages)}
-    if profile.text_from_outlines:
+    if profile.replace_drawings:
         left = outline_items(output)
         over = {index: count for index, count in drawings.items() if count > DRAWN_TEXT}
         checks.append(
@@ -630,6 +691,25 @@ def anonymize(
             "no oracle reads them (--keep-drawings keeps them, and gives up the claim)"
             for index, count in sorted(over.items())
         )
+        codes_left = machine_codes(output)
+        checks.append(
+            Check(
+                "machine-codes",
+                "docmutant content scan",
+                not codes_left,
+                {"codes_replaced": codes, "codes_left": sum(codes_left.values())},
+            )
+        )
+        problems.extend(
+            f"{label}: {count} machine-readable codes left"
+            for label, count in sorted(codes_left.items())
+        )
+    if profile.reads_render:
+        check, unread = _check_render(
+            source_read, data, avoid | fitter.source_words, reader, metrics, paragraphs
+        )
+        checks.append(check)
+        problems.extend(unread)
     if problems:
         return Result(None, tuple(problems), tuple(checks), pages=len(original.pages))
 
@@ -659,6 +739,8 @@ def anonymize(
     replaced = ["the words of every page", *sorted(found.blocking)]
     if paragraphs:
         replaced.append(f"{paragraphs} outline items: paragraphs of new text")
+    if codes:
+        replaced.append(f"{codes} machine-readable codes: flat blocks")
     if profile.replace_images and images:
         replaced.append(f"{images} images: flat")
     if substituted:
