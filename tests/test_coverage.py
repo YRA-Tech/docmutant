@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import io
 import re
 
@@ -446,10 +447,14 @@ def test_a_font_with_no_text_is_swapped_by_code_under_coverage_all():
 # --- substitution -------------------------------------------------------------------------
 
 
+@functools.lru_cache
 def _program(
     chars: str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ",
 ) -> bytes:
-    """A small TrueType font: each glyph is a box, 500 wide, and w is 800."""
+    """A small TrueType font: each glyph is a box, 500 wide, and w is 800.
+
+    Kept, because a font holds the time it was built, and the same run must see the same one.
+    """
     names = [".notdef"] + [f"uni{ord(char):04X}" for char in chars]
     pen = TTGlyphPen(None)
     pen.moveTo((50, 0))

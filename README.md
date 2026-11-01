@@ -38,8 +38,9 @@ the labels stay exact.
 Pre-alpha. Built so far: the manifest model with its policy checks, a
 validator, a first reduce/sanitize mode for rendering bugs with crash, hang and
 error oracles that run docling-parse, and an anonymize mode that changes every
-word and every hidden layer of a document, and writes nothing unless the saved
-file passes its checks. See [docs/DESIGN.md](docs/DESIGN.md) for the design and
+word and every hidden layer of a document, turns text drawn as outlines into new
+text under its privacy profile, and writes nothing unless the saved file passes its
+checks. See [docs/DESIGN.md](docs/DESIGN.md) for the design and
 the roadmap.
 
 ```console

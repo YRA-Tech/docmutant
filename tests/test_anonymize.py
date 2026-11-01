@@ -15,7 +15,7 @@ from test_fit import _pdf
 
 from docmutant.anonymize import ProfileError, anonymize, replace_all_images, resolve_profile
 from docmutant.cli import main
-from docmutant.coverage import DRAWN_TEXT, curved_fills
+from docmutant.coverage import curved_fills
 from docmutant.fit import CoverageStop, FitPolicy, WordFitter
 from docmutant.geometry import BoxSettings, within
 from docmutant.layers import (
@@ -403,25 +403,6 @@ def test_curved_shapes_are_counted_in_forms_too_and_not_when_stroked():
     pdf.pages[0].obj.Resources.XObject = pikepdf.Dictionary(Fm=pdf.make_indirect(form))
     pdf.pages[0].obj.Contents = pdf.make_stream(b"/Fm Do " + _curved(1))
     assert curved_fills(pdf.pages[0]) == 3
-
-
-def test_text_drawn_as_outlines_stops_the_run_where_no_oracle_would_see_it():
-    # No glyph at all: every check of the words passes without having looked at anything.
-    pdf = pikepdf.Pdf.new()
-    page = pdf.add_blank_page(page_size=(612, 792))
-    page.obj.Contents = pdf.make_stream(_curved(DRAWN_TEXT + 1))
-    result = _run(pdf)
-    assert result.data is None
-    assert any("drawn as outlines" in problem for problem in result.problems)
-
-
-def test_keeping_drawings_goes_on_and_gives_up_the_claim():
-    pdf = _source(extra=_curved(DRAWN_TEXT + 1))
-    profile = _privacy(keep_drawings=True)
-    assert profile.claims == ()
-    result = _run(pdf, profile)
-    assert result.data is not None, result.problems
-    assert any("curved" in item for item in result.kept)
 
 
 def test_keeping_images_gives_up_the_claim():

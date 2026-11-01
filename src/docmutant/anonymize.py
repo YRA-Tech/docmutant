@@ -49,8 +49,9 @@ from docmutant.mutate import (
     image_xobjects,
     read_stream,
 )
-from docmutant.substitute import FontSource
-from docmutant.tracker import Line, UnsupportedText, group_lines, trace_page
+from docmutant.outlines import FONT_PREFIX, outline_items, text_from_outlines
+from docmutant.substitute import CannotSubstitute, FontSource
+from docmutant.tracker import Glyph, Line, UnsupportedText, group_lines, trace_page
 
 
 @dataclass(frozen=True)
@@ -66,8 +67,8 @@ class Profile:
     requires_coverage: bool
     """Whether a word left, or a word that pdfium still reads, stops the run."""
 
-    allows_drawn_text: bool = True
-    """Whether a page that may show text as outlines can go on. See ``curved_fills``."""
+    text_from_outlines: bool = False
+    """Whether what the pages draw as glyph shapes becomes new text. Otherwise it stays exact."""
 
 
 PROFILES = {
@@ -79,7 +80,7 @@ PROFILES = {
         replace_images=True,
         claims=("privacy",),
         requires_coverage=True,
-        allows_drawn_text=False,
+        text_from_outlines=True,
     ),
     "training": Profile(
         "training",
@@ -125,7 +126,7 @@ def resolve_profile(
         settings=settings,
         policy=policy,
         replace_images=profile.replace_images and not keep_images,
-        allows_drawn_text=profile.allows_drawn_text or keep_drawings,
+        text_from_outlines=profile.text_from_outlines and not keep_drawings,
         claims=() if keep_images or keep_drawings else profile.claims,
         requires_coverage=profile.requires_coverage or policy.coverage == "all",
     )
@@ -382,6 +383,20 @@ def _fingerprint(pdf: pikepdf.Pdf, kept_fonts: Iterable[str]) -> dict[str, Any]:
     }
 
 
+def _source_glyphs(page: pikepdf.Page, new_text: set[tuple[object, ...]]) -> list[Glyph]:
+    """What the page shows apart from paragraphs made from outlines, which had no source words."""
+    return [glyph for glyph in trace_page(page) if glyph.font_key not in new_text]
+
+
+def _new_text_fonts(pdf: pikepdf.Pdf) -> set[tuple[object, ...]]:
+    return {
+        obj.objgen
+        for obj in pdf.objects
+        if isinstance(obj, pikepdf.Dictionary)
+        and str(obj.get("/BaseFont", "")).startswith("/" + FONT_PREFIX)
+    }
+
+
 def _check_output(
     profile: Profile,
     source: pikepdf.Pdf,
@@ -393,12 +408,13 @@ def _check_output(
     """Run every oracle on the saved bytes. Returns the checks, what failed, the file and counts."""
     problems: list[str] = []
     output = pikepdf.open(io.BytesIO(data))
+    new_text = _new_text_fonts(output)
 
     moved = 0.0
     violations = in_scope = changed = out_of_scope = pairs = kept = 0
     for index, page in enumerate(output.pages):
         try:
-            lines = group_lines(trace_page(page))
+            lines = group_lines(_source_glyphs(page, new_text))
         except UnsupportedText as error:
             violations += 1
             problems.append(f"page {index + 1}: the output cannot be traced: {error}")
@@ -517,14 +533,6 @@ def anonymize(
             source_lines[index] = group_lines(trace_page(page))
         except UnsupportedText as error:
             problems.append(f"page {index + 1}: the text cannot be traced: {error}")
-    drawings = {index: curved_fills(page) for index, page in enumerate(original.pages)}
-    if not profile.allows_drawn_text:
-        problems.extend(
-            f"page {index + 1}: {count} curved shapes may be text drawn as outlines, or a logo; "
-            "no oracle reads them (--keep-drawings keeps them, and gives up the claim)"
-            for index, count in drawings.items()
-            if count > DRAWN_TEXT
-        )
     if problems:
         return Result(None, tuple(problems), pages=len(original.pages))
 
@@ -561,6 +569,20 @@ def anonymize(
         mutations.append({"operator": "substitute-fonts", "params": {"fonts": len(substituted)}})
     else:
         substituted = dict(fitter.substituted)
+    paragraphs = 0
+    if profile.text_from_outlines:
+        try:
+            outlines = text_from_outlines(
+                pdf,
+                fonts or FontSource(()),
+                seed,
+                vocabulary,
+                avoid | fitter.source_words,
+            )
+        except CannotSubstitute as error:
+            return Result(None, (f"outlines cannot become text: {error}",), pages=len(pdf.pages))
+        paragraphs = outlines.items
+        mutations.append({"operator": "text-from-outlines", "params": {"items": paragraphs}})
     images = 0
     if profile.replace_images:
         images = replace_all_images(pdf)
@@ -583,14 +605,30 @@ def anonymize(
     checks, problems, output, metrics = _check_output(
         profile, original, source, data, source_lines, avoid | fitter.source_words
     )
-    if not profile.allows_drawn_text:
+    drawings = {index: curved_fills(page) for index, page in enumerate(output.pages)}
+    if profile.text_from_outlines:
+        left = outline_items(output)
+        over = {index: count for index, count in drawings.items() if count > DRAWN_TEXT}
         checks.append(
             Check(
                 "drawn-text",
                 "docmutant content scan",
-                True,
-                {"limit": DRAWN_TEXT, "largest": max(drawings.values(), default=0)},
+                not left and not over,
+                {
+                    "items_replaced": paragraphs,
+                    "items_left": sum(left.values()),
+                    "limit": DRAWN_TEXT,
+                    "largest": max(drawings.values(), default=0),
+                },
             )
+        )
+        problems.extend(
+            f"{label}: {count} outline items left" for label, count in sorted(left.items())
+        )
+        problems.extend(
+            f"page {index + 1}: {count} curved shapes remain, too large to be glyphs; "
+            "no oracle reads them (--keep-drawings keeps them, and gives up the claim)"
+            for index, count in sorted(over.items())
         )
     if problems:
         return Result(None, tuple(problems), tuple(checks), pages=len(original.pages))
@@ -619,6 +657,8 @@ def anonymize(
     if found.images and not profile.replace_images:
         kept.append(f"{found.images} images, not checked: they can show text")
     replaced = ["the words of every page", *sorted(found.blocking)]
+    if paragraphs:
+        replaced.append(f"{paragraphs} outline items: paragraphs of new text")
     if profile.replace_images and images:
         replaced.append(f"{images} images: flat")
     if substituted:

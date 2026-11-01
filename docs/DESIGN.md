@@ -114,10 +114,10 @@ a `family` entry in its manifest.
 Replace the content of a whole document, in every layer (see 5.6), under the
 `training` or `privacy` profile (see 4). Steps, in order:
 
-1. Refuse a page that cannot be traced or, under `privacy`, that may show text as
-   outlines.
+1. Refuse a page that cannot be traced.
 2. Fit new words on every page (see 5.3).
-3. Under `privacy`: give every font a substitute and replace every image.
+3. Under `privacy`: give every font a substitute, turn text drawn as outlines into
+   paragraphs of new text (see 5.5) and replace every image.
 4. Clean the hidden layers (see 5.6).
 5. Save, open the saved bytes again, and run every oracle on them (see 5.8).
 
@@ -130,8 +130,9 @@ reachable through tags and links, and the text of the source with them.
 
 Replacement is not yet of the same type (a name for a name): that takes semantic
 selection (see 5.7). `--vocabulary` names a file of real words; without one, every
-word is invented. `--keep-images` and `--keep-drawings` go on with what no oracle
-reads, and the file then has no `privacy` claim.
+word is invented. `--keep-images` and `--keep-drawings` keep what no oracle reads,
+and the file then has no `privacy` claim. `--keep-drawings` keeps outlines exact,
+which is what `training` always does.
 
 ## 4. Profiles: what each use keeps
 
@@ -162,7 +163,7 @@ profile, and only at the level that the user asks for.
 
 | Signal | `bug-repro` | `metamorphic` | `training` | `privacy` |
 |---|---|---|---|---|
-| Geometry | exact where the oracle needs it; the rest is removed | exact, except the one variable under test | exact, except words moved inside a held line (see 4.4) | as `training`; rounding is an opt-in level |
+| Geometry | exact where the oracle needs it; the rest is removed | exact, except the one variable under test | exact, except words moved inside a held line (see 4.4) | as `training`, except that outlines of text become text (see 5.5); rounding is an opt-in level |
 | Text | equal-width swap | changed only as the family says | changed; labels updated with it | every word replaced (see 4.4) |
 | Glyph shapes | removed unless the oracle needs them | exact | exact, or a metric-compatible substitute | substitute |
 | Image samples | flat grey or noise | exact | exact, or a content-aware replacement | flat and light; by image class is planned |
@@ -592,21 +593,51 @@ number that is mid-grey in RGB is close to black.
 
 ### 5.5 Vector graphics
 
-The reduce mode keeps the paths that the oracle needs, exactly. The anonymize mode
-keeps paths too, because the profiles hold their coordinates, and no oracle reads
-what they show. That is a real gap: a logo, a signature or a QR code can be a path,
-and some producers draw all text as outlines, which the tracker cannot see. On such
-a page every check of the words passes without having looked at anything.
+The reduce mode keeps the paths that the oracle needs, exactly. The `training`
+profile keeps paths too, outlines of text among them, because a model should see
+what the source draws. `--keep-drawings` asks the same of `privacy`, and gives up
+its claim.
 
-So `privacy` counts the curved shapes that each page fills (`curved_fills`) and stops
-above 100. On the sample, pages of outlined text hold 120 to 2,845 and no glyphs, two
-pages with logos hold 140 and 172, and every other page holds at most 35. The count
-says that someone must look, not what is there. A drawing under the limit stays, and
-the manifest says so: on the sample, a data sheet keeps its logo and a QR code, which
-only a reviewer catches.
+Some producers draw all text as outlines, which the tracker cannot see. On such a
+page every check of the words passes without having looked at anything. So under
+`privacy`, each outline item becomes a paragraph of new text (`outlines.py`), the one
+exception to holding path coordinates. An item is what a person would read as a run
+of text:
 
-Planned: distort or remove recognisable illustrations (as pdf-mangler does), which
-would let such pages go on. It is also what a page of outlined text needs.
+- Its shapes are filled, of one colour, written in one direction, and side by side on
+  a line, with gaps of at most their height. They need not be drawn in that order,
+  and a clip around each short run does not divide them: producers do both.
+- A shape is glyph-sized: under 72 pt high, and if it has one subpath or only boxes,
+  under 72 pt wide and at most 2.5 times as wide as it is high.
+- The shapes include one that a box is not: a curve, or a polygon of 6 points or
+  more, as an H or a T has. Letters with no curves go with their word, and two bars
+  are just two bars.
+- Alone, a fill is an item only if it has 3 subpaths or more and is not all boxes. It
+  can be a word; with fewer it can be a bullet, a ring or a check box.
+
+The sizes come from the same 12 files: shapes of glyphs are almost all under 40 pt, and
+backgrounds above 150 pt.
+
+The paragraph is the item's width, by horizontal scaling, and takes its height from the
+item. Its words are new: the number of letters follows from the width, and word breaks are
+random, so that they say nothing of the source's. Each is marked as a paragraph of its own.
+
+The shapes go, with any group left painting nothing, because a transform for each letter
+records its advance, and an advance can identify a letter. A paragraph is drawn where the
+item's last shape was, so that what covered the shapes still covers it, but outside the groups
+open there, which open again after it. A clip for each short run would otherwise cut it down
+to one run.
+
+What stays, and the oracle `drawn-text` runs on the saved file:
+
+- No item is left, and no page keeps more than 100 curved shapes. These would be too
+  large to be glyphs. The count says that someone must look, not what is there.
+- A lone glyph stays, because it spells little and a bullet looks like one.
+- A logo of several colours can stay in part: on the sample, a shield and a red X.
+- A QR code stays if it is drawn in boxes. Curves drawn with strokes, such as a
+  signature, stay. So does text used as a clip for a picture.
+
+The manifest counts the paths that remain, and only a reviewer can say what they show.
 
 ### 5.6 Hidden layers (built: `layers.py`)
 
@@ -690,7 +721,7 @@ region and every text region that stayed, with the detector's confidence.
 | file identifier: not the source's | built |
 | structure: the tag tree has the same shape and the same marked-content IDs | built |
 | image geometry: each page draws images of the same sizes and depths. The filter can change, under `privacy`: a flat image is Flate | built |
-| drawn text: no page has so many curved shapes that it may show text as outlines (see 5.5) | built |
+| drawn text: no outline item is left, and no page keeps so many curved shapes that someone should look (see 5.5) | built |
 | render difference against a second engine (pypdfium2 by default), with per-page `mean_abs_error` and `changed_pixels_ratio` | planned |
 | text-cell difference between two runs or two engines | planned |
 | invariant check for metamorphic families | planned |
@@ -809,10 +840,11 @@ and Caladea). No dependency's code is copied into docmutant's files.
   tracker with each glyph until the next positioning operator.
 - How much tracking stays invisible. The default of 0.02 em per gap is an
   estimate; the render-difference oracle should test it.
-- What to do with drawings. A page over the limit for curved shapes stops today, so
-  whole documents of outlined text cannot be cleaned. Removing or distorting the
-  shapes would let them go on, but changes path coordinates, which the profiles hold.
-- Whether 100 curved shapes is the right limit. It comes from 12 files.
+- What counts as an outline item. Its sizes and limits come from 12 files, of which
+  two draw all their text as outlines. A drawing of small shapes can pass for text.
+- Whether 100 curved shapes is still the right limit. It comes from the same files, and
+  now counts only what is too large to be a glyph.
+- Whether paragraphs should hold a font's weight. All of them are one regular font.
 - How wide a gap counts as structure. The 0.75 em for holding a gap under word
   starts `moved` is an estimate: a justified word space can come close to it, and
   table cells can be closer.
