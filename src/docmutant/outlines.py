@@ -30,6 +30,7 @@ from docmutant.content import Instruction, operator_name
 from docmutant.layers import CONSONANTS, VOWELS
 from docmutant.mutate import StreamRef, content_streams, read_stream, write_stream
 from docmutant.substitute import CannotSubstitute, FontSource, ShownCode, embed_substitute
+from docmutant.tracker import Point
 
 Matrix = tuple[float, float, float, float, float, float]
 
@@ -357,6 +358,29 @@ def outline_items(pdf: pikepdf.Pdf) -> dict[str, int]:
         if count:
             found[ref.label()] = count
     return found
+
+
+def outline_quads(
+    pdf: pikepdf.Pdf,
+) -> list[tuple[StreamRef, tuple[Point, Point, Point, Point]]]:
+    """The place of each outline item, in the frame of the stream that draws it."""
+    quads = []
+    for ref, unit in drawing_streams(pdf):
+        for item in _items(read_stream(pdf, ref), unit):
+            x0, y0, x1, y1 = item.box
+            turn = _rotation(item.shapes[0].turn)
+            quads.append(
+                (
+                    ref,
+                    (
+                        apply_matrix(turn, x0, y0),
+                        apply_matrix(turn, x1, y0),
+                        apply_matrix(turn, x1, y1),
+                        apply_matrix(turn, x0, y1),
+                    ),
+                )
+            )
+    return quads
 
 
 class _Words:

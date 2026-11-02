@@ -41,7 +41,7 @@ error oracles that run docling-parse, and an anonymize mode that changes every
 word and every hidden layer of a document, turns text drawn as outlines into new
 text and machine-readable codes into flat blocks under its privacy profile, and
 writes nothing unless the saved file passes its checks, which include reading the
-rendered pages. The privacy profile needs [Tesseract](https://github.com/tesseract-ocr/tesseract)
+rendered pages and comparing them with the source's. The privacy profile needs [Tesseract](https://github.com/tesseract-ocr/tesseract)
 on the path. See [docs/DESIGN.md](docs/DESIGN.md) for the design and
 the roadmap.
 

@@ -189,6 +189,7 @@ PRESERVED = {
     "geometry": "geometry",
     "structure": "structure",
     "image geometry": "image-geometry",
+    "what no step changes": "render-difference",
 }
 """Each signal that a run under a profile keeps exact, and the oracle that checks it."""
 

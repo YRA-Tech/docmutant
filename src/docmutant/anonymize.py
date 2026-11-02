@@ -22,7 +22,7 @@ from typing import Any
 import pikepdf
 import pypdfium2
 
-from docmutant import reading
+from docmutant import difference, reading
 from docmutant.codes import machine_codes, replace_machine_codes
 from docmutant.content import Instruction, operator_name
 from docmutant.coverage import (
@@ -40,6 +40,7 @@ from docmutant.layers import (
     hidden_words,
     leftover_layers,
     residual_strings,
+    soft_mask_images,
     tag_shape,
 )
 from docmutant.mutate import (
@@ -313,7 +314,7 @@ def replace_all_images(pdf: pikepdf.Pdf) -> int:
         for image in images
         for key in ("/SMask", "/Mask")
         if isinstance(image.get(key), pikepdf.Stream)
-    }
+    } | soft_mask_images(pdf)
     for image in images:
         _flat_image(image, image.objgen in masks)
     return len(images) + replace_inline_images(pdf)
@@ -560,6 +561,36 @@ def _check_render(
     return check, problems
 
 
+def _check_difference(
+    source: bytes, data: bytes, regions: Sequence[difference.PageRegions]
+) -> tuple[Check, list[str]]:
+    """Compare the pictures of source and saved file. A page that does not render has not passed."""
+    target = f"pypdfium2 {pypdfium2.PYPDFIUM_INFO}"
+    try:
+        pages = difference.compare(source, data, regions)
+    except pypdfium2.PdfiumError as error:
+        return Check("render-difference", target, False), [f"a page does not render: {error}"]
+    problems = difference.problems(pages)
+    check = Check(
+        "render-difference",
+        target,
+        not problems,
+        {
+            "pages": [
+                {
+                    "compared": round(page.compared, 4),
+                    "changed_pixels_ratio": round(page.changed_pixels_ratio, 6),
+                    "mean_abs_error": round(page.mean_abs_error, 6),
+                    "darkened": round(page.darkened, 6),
+                    "lines_lost": page.lines_lost,
+                }
+                for page in pages
+            ],
+        },
+    )
+    return check, problems
+
+
 def anonymize(
     source: bytes,
     profile: Profile,
@@ -710,6 +741,16 @@ def anonymize(
         )
         checks.append(check)
         problems.extend(unread)
+    regions = difference.changed_regions(
+        original,
+        source_lines,
+        images=profile.replace_images,
+        drawings=profile.replace_drawings,
+        tolerance=profile.settings.tolerance.out,
+    )
+    check, damage = _check_difference(source, data, regions)
+    checks.append(check)
+    problems.extend(damage)
     if problems:
         return Result(None, tuple(problems), tuple(checks), pages=len(original.pages))
 

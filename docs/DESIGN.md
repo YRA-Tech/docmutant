@@ -595,7 +595,10 @@ Under `privacy`, every image becomes flat and light at the same size, depth and 
 space, and a mask becomes empty: its shape can show a logo or a signature, and an image
 that was see-through in places must not become a block that hides the text under it.
 The fill depends on the colour space, because a sample counts ink in CMYK, where the
-number that is mid-grey in RGB is close to black.
+number that is mid-grey in RGB is close to black. An image inside a soft mask counts as a
+mask too. Its brightness says where a fill shows through, so a light one lets the fill show
+everywhere: on the sample, it spread a shadow into a grey block across a whole card, which
+every oracle passed until the render difference.
 
 ### 5.5 Vector graphics
 
@@ -761,14 +764,40 @@ region and every text region that stayed, with the detector's confidence.
 | drawn text: no outline item is left, and no page keeps so many curved shapes that someone should look (see 5.5) | built |
 | machine codes: no QR code, Data Matrix or barcode drawn as paths is left (see 5.5) | built |
 | readable text: OCR of the render reads no source word in the output, and has read something (see 5.5) | built |
-| render difference against a second engine (pypdfium2 by default), with per-page `mean_abs_error` and `changed_pixels_ratio` | planned |
+| render difference: pypdfium2 renders source and saved file, and what a run does not change must look the same (see below), with per-page `compared`, `changed_pixels_ratio`, `mean_abs_error`, `darkened` and `lines_lost` | built |
+| render difference between two engines | planned |
 | text-cell difference between two runs or two engines | planned |
 | invariant check for metamorphic families | planned |
 
 The anonymize mode runs the oracles above on the saved bytes, not on the file in
-memory. **They do not read pictures.** On the sample they all passed a page that a
-flat image had turned black, and one where a word crossed a table border. Only the
-render difference can catch that. Until it exists, someone must look at the output.
+memory. Most of them read operators and objects, not pictures. On the sample they all
+passed a page that a flat image had turned black, one where a word crossed a table
+border, and one where an image in a soft mask spread a grey block across a card.
+
+**The render difference** (`difference.py`) compares the pictures at 144 dpi. It leaves out
+the places that the run means to change, all taken from the source: the lines of text, with
+a place set by their font size because a font's own numbers can be wrong; outline items;
+machine-readable codes; annotations that show an appearance; and images. Whatever a run
+keeps stays in the comparison, so under `--keep-images` not a pixel of an image may change.
+It stops the run when:
+
+- more than 100 pixels of a page changed by more than 32 grey levels outside those places.
+  New text that strays out of the source's places counts, because the output's own places
+  are not left out;
+- more than 1% of a page got darker by more than 64 levels where an image was. Those places
+  are left out of the first measure, so a black image would otherwise pass. Getting lighter
+  is what a flat image does;
+- a line of text keeps under 20% of its ink, unless it is over an image. White text on a dark
+  picture cannot stand out on a flat, light one.
+
+On the 9 sample files that pass, the most any page changed is 19 pixels, and the most that
+got darker is 0.044% of a page. A soft mask left light stops one of them at 10%, and black
+images stop two others, at up to 45% of a page.
+
+It does not see what stays inside a place: a word that crosses a border within its own line,
+a lost logo in a line's place, or how a replacement looks. On a page full of text and images
+it compares little, as low as 19% of a page on the sample, and the manifest records this as
+`compared`. Review stays.
 
 The command oracles run the target in a child process. A target is any command with
 `{pdf}` and `{page}` placeholders, so Java, Rust and C++ tools work as well as
@@ -847,7 +876,7 @@ class Oracle(Protocol):
 ## 8. Dependencies and licensing
 
 Code: MIT. Required: pikepdf (MPL-2.0), pypdfium2 (Apache-2.0 or BSD-3-Clause),
-pydantic (MIT), fontTools (MIT). Planned optional: docling (MIT), presidio (MIT),
+pydantic (MIT), fontTools (MIT), Pillow (MIT-CMU). Planned optional: docling (MIT), presidio (MIT),
 Faker (MIT). Substitute fonts are not shipped: they are read from the system or a
 directory the user names, under their own licenses (OFL for Liberation, Carlito
 and Caladea). No dependency's code is copied into docmutant's files.
@@ -858,7 +887,7 @@ and Caladea). No dependency's code is copied into docmutant's files.
 |---|---|---|
 | M1 | Manifest, policy validation, CLI | done |
 | M2 | Reduce mode for rendering bugs, crash/hang oracles, basic evidence | built; first real-document runs in progress |
-| M3 | Text-position tracker; render-difference oracle; geometry (with the settings of 4.4) and image-geometry preservation oracles | built, except the render-difference oracle, which is next |
+| M3 | Text-position tracker; render-difference oracle; geometry (with the settings of 4.4) and image-geometry preservation oracles | built; the render difference compares source and output in one engine, not two |
 | M4 | Font glyph availability and metric-compatible substitution | substitution built for fonts that need more glyphs; glyph availability from the font program next |
 | M5 | Hidden layers; anonymize mode; profiles; fingerprint report; schema 0.2 | built; privacy normalization levels 1 and 2 are not |
 | M6 | Fuzz and metamorphic modes; corpus packaging | |
@@ -871,14 +900,17 @@ and Caladea). No dependency's code is copied into docmutant's files.
 - Counsel's review of `CORPUS-LICENSES.md` and the attestation statements.
 - Text in images: which OCR to use for evidence and replacement, without making
   the core depend on a model.
-- Tolerances for the render-difference oracle across renderers.
+- Tolerances for a render difference across renderers. Today's compares one engine with
+  itself, where clean pages differ by almost nothing, so its limits say little about two.
+- Whether the limits of the render difference are right. They come from 12 files, and the
+  100 pixels, the 1% and the 20% have only met the damage those files could show.
 - How much measurement difference to allow, on top of the box tolerance, when
   a text engine (pypdfium2 or the user's target) reports the word boxes
   instead of the tracker. A fixed allowance per glyph is not enough: an
   engine that rounds widths (pdfium truncates them) drifts further from the
   tracker with each glyph until the next positioning operator.
 - How much tracking stays invisible. The default of 0.02 em per gap is an
-  estimate; the render-difference oracle should test it.
+  estimate. The render difference cannot test it: tracking stays inside a line's place.
 - What counts as an outline item. Its sizes and limits come from 12 files, of which
   two draw all their text as outlines. A drawing of small shapes can pass for text.
 - Whether 100 curved shapes is still the right limit. It comes from the same files, and

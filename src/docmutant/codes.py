@@ -19,7 +19,7 @@ from dataclasses import dataclass
 import pikepdf
 
 from docmutant.content import Instruction, operator_name
-from docmutant.mutate import read_stream, write_stream
+from docmutant.mutate import StreamRef, read_stream, write_stream
 from docmutant.outlines import (
     Matrix,
     apply_matrix,
@@ -28,6 +28,7 @@ from docmutant.outlines import (
     multiply,
     without_empty_groups,
 )
+from docmutant.tracker import Point
 
 SMALLEST_CODE = 15
 """Boxes. A smaller group of boxes is too easily something else, such as a few bars in a chart."""
@@ -298,6 +299,18 @@ def machine_codes(pdf: pikepdf.Pdf) -> dict[str, int]:
         if count:
             found[ref.label()] = count
     return found
+
+
+def code_quads(
+    pdf: pikepdf.Pdf,
+) -> list[tuple[StreamRef, tuple[Point, Point, Point, Point]]]:
+    """The place of each code, in the frame of the stream that draws it."""
+    quads = []
+    for ref, unit in drawing_streams(pdf):
+        for code in _codes(read_stream(pdf, ref), unit):
+            x0, y0, x1, y1 = code.extent
+            quads.append((ref, ((x0, y0), (x1, y0), (x1, y1), (x0, y1))))
+    return quads
 
 
 def _block(code: _Code, inverse: Matrix) -> list[Instruction]:

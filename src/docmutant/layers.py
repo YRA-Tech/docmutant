@@ -605,6 +605,30 @@ def clean_layers(pdf: pikepdf.Pdf, seed: int, avoid: Iterable[str]) -> LayerRepo
     return LayerReport(dict(removed), dict(rewritten))
 
 
+def soft_mask_images(pdf: pikepdf.Pdf) -> set[tuple[int, int]]:
+    """The images that a soft mask draws: they say where a page shows, and show nothing."""
+    found: set[tuple[int, int]] = set()
+    seen: set[tuple[int, int]] = set()
+
+    def visit(group: pikepdf.Object) -> None:
+        if group.objgen in seen:
+            return
+        seen.add(group.objgen)
+        resources = group.get("/Resources")
+        xobjects = resources.get("/XObject") if resources is not None else None
+        for key in xobjects if xobjects is not None else ():
+            inner = xobjects[key]
+            if inner.get("/Subtype") == "/Image":
+                found.add(inner.objgen)
+            elif inner.get("/Subtype") == "/Form":
+                visit(inner)
+
+    for holder, key, value, _ in _walk(pdf):
+        if key == "/G" and "/S" in holder and isinstance(value, pikepdf.Stream):
+            visit(value)
+    return found
+
+
 def residual_strings(pdf: pikepdf.Pdf, words: Iterable[str]) -> dict[str, tuple[str, ...]]:
     """Words of the source in any string of ``pdf``, by the key that holds them."""
     forbidden = frozenset(words)
