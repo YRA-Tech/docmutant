@@ -78,7 +78,9 @@ refuses manifests that break these rules. See
 
 ## Licensing
 
-The docmutant code is under the [MIT License](LICENSE).
+The docmutant code is under the [MIT License](LICENSE). Its bundled vocabulary is a
+modified version of [SCOWL](http://wordlist.aspell.net/), under the notice in
+[src/docmutant/data/vocabulary-copyright.txt](src/docmutant/data/vocabulary-copyright.txt).
 
 Documents produced with docmutant carry their own license, recorded per file in
 the manifest. [CORPUS-LICENSES.md](CORPUS-LICENSES.md) explains the policy.

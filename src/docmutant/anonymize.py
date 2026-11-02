@@ -61,6 +61,7 @@ from docmutant.mutate import (
 from docmutant.outlines import FONT_PREFIX, outline_items, text_from_outlines
 from docmutant.substitute import CannotSubstitute, FontSource
 from docmutant.tracker import Glyph, Line, UnsupportedText, group_lines, trace_page
+from docmutant.vocabulary import fingerprint as vocabulary_fingerprint
 
 SOME_TEXT = 20
 """Words or paragraphs: with this many, a reader that saw nothing must have gone wrong."""
@@ -633,6 +634,7 @@ def anonymize(
     reader: reading.Reader | None = None,
 ) -> Result:
     """Change a copy of ``source`` under ``profile``. See the module's description."""
+    vocabulary = list(vocabulary)
     original = pikepdf.open(io.BytesIO(source))
     pdf = pikepdf.open(io.BytesIO(source))
     found = other_layers(original)
@@ -682,6 +684,7 @@ def anonymize(
                 "word_starts": profile.policy.word_starts,
                 "tiers": dict(tiers),
                 "lines_pinned": lines_pinned,
+                "vocabulary": vocabulary_fingerprint(vocabulary),
             },
         },
         {"operator": "remove-unreferenced-resources", "params": {}},

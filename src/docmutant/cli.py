@@ -272,6 +272,7 @@ def _manifest_draft(args: argparse.Namespace, profile: Any, result: Any) -> dict
 def _cmd_anonymize(args: argparse.Namespace) -> int:
     from docmutant.anonymize import ProfileError, anonymize, resolve_profile
     from docmutant.substitute import FontSource
+    from docmutant.vocabulary import default_vocabulary
 
     if args.source.resolve() == args.out.resolve():
         print("error: the output would overwrite the source", file=sys.stderr)
@@ -289,7 +290,7 @@ def _cmd_anonymize(args: argparse.Namespace) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 2
     fonts = FontSource(args.font_dir) if args.font_dir else FontSource()
-    vocabulary = _read_vocabulary(args.vocabulary) if args.vocabulary else []
+    vocabulary = _read_vocabulary(args.vocabulary) if args.vocabulary else default_vocabulary()
     try:
         result = anonymize(
             args.source.read_bytes(), profile, vocabulary=vocabulary, fonts=fonts, seed=args.seed
@@ -432,7 +433,8 @@ def main(argv: list[str] | None = None) -> int:
     anonymize.add_argument(
         "--vocabulary",
         type=Path,
-        help="file of real words to replace with; without one, every word is invented",
+        help="file of real words to replace with (default: common English words from SCOWL; "
+        "an empty file gives invented words only)",
     )
     anonymize.add_argument(
         "--font-dir",

@@ -130,8 +130,9 @@ A run takes the whole document. A run on some pages would leave the other pages
 reachable through tags and links, and the text of the source with them.
 
 Replacement is not yet of the same type (a name for a name): that takes semantic
-selection (see 5.7). `--vocabulary` names a file of real words; without one, every
-word is invented. `--keep-images` and `--keep-drawings` keep what would stop the
+selection (see 5.7). Real words come from a bundled vocabulary of common
+English words, or from the file that `--vocabulary` names; an empty file leaves
+invented words only. The manifest names the vocabulary by its size and hash. `--keep-images` and `--keep-drawings` keep what would stop the
 claim, and the file then has no `privacy` claim and no reading of its render.
 `--keep-drawings` keeps outlines, codes and graphics exact, which is what `training`
 always does.
@@ -542,9 +543,14 @@ Planned, in order:
   word must leave the minimum gap, and a word whose end is held fits within the
   tolerance, with tracking if the limit allows it. With `moved`, the gaps of each
   stretch between wide gaps take up the difference. The output goes through the
-  geometry oracle, and a line that fails returns to its source text. The caller
-  supplies the vocabulary; words are chosen by fit, not by meaning, so it should be
-  curated: a general dictionary puts unsuitable words into the output.
+  geometry oracle, and a line that fails returns to its source text. Words are
+  chosen by fit, not by meaning, so the vocabulary is curated: a general dictionary
+  puts unsuitable words into the output. The bundled one (`data/vocabulary.txt`)
+  holds SCOWL's American and English words up to level 35, the common words of a
+  small dictionary: 38,937 of them, in lowercase only, so no proper name,
+  abbreviation or possessive, and none of the LDNOOBW English list of offensive words
+  or their simple inflections. The filter also removes a few harmless words, such as
+  butter, and cannot know every slur. `scripts/vocabulary.py` makes the list again.
 
   Under coverage `best-effort`, a word keeps its source text, with the reason in the
   report, when its font gives no text, it holds no run of two or more letters, it is
@@ -953,6 +959,11 @@ Faker (MIT). Substitute fonts are not shipped: they are read from the system or 
 directory the user names, under their own licenses (OFL for Liberation, Carlito
 and Caladea). No dependency's code is copied into docmutant's files.
 
+Data shipped: the vocabulary, a modified version of SCOWL under its permissive
+notice, which `data/vocabulary-copyright.txt` holds with a note of the change; and
+the widths of the standard fonts, measured from the Liberation fonts. The offensive
+word list used to filter the vocabulary (LDNOOBW, CC BY 4.0) is not shipped.
+
 ## 9. Roadmap
 
 | Milestone | Content | Status |
@@ -1005,7 +1016,8 @@ and Caladea). No dependency's code is copied into docmutant's files.
 - How wide a gap counts as structure. The 0.75 em for holding a gap under word
   starts `moved` is an estimate: a justified word space can come close to it, and
   table cells can be closer.
-- Which vocabulary to ship. Fitted replacement takes one from the caller, and the
-  system dictionary used for measuring holds words unsuited to published output.
+- Vocabularies beyond common English: other languages, and words by type (names,
+  places, units) for replacement of the same type (see 5.7). The bundled list is
+  English only, so a document in another language gets English words.
 - How to model text-in-scan replacement so that OCR training data keeps the
   noise and skew statistics of the original scan.
