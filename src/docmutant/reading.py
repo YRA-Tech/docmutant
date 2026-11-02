@@ -6,10 +6,10 @@ oracle looks at the picture of the page instead, through OCR, and so does not sh
 spots of the code that changed the page.
 
 A word of the output is a match if it is a word of the source, anywhere in the document, unless it
-is part of a new word that the run wrote there: a reader can split a long word, and new words can
-hold short ones. Or if most of it is part of a source word that was read at the same place: what is
-left of a word in which only some letters changed. Chance fragments are common in new words, but
-layout holds, so a fragment in the same place is not chance.
+begins or ends a new word that the run wrote there: a reader can split a long word in two. A source
+word in the middle of a new one still counts. Or if most of it is part of a source word that was
+read at the same place: what is left of a word in which only some letters changed. Chance
+fragments are common in new words, but layout holds, so a fragment in the same place is not chance.
 
 A match stops the run. No match is evidence, not proof: OCR misses small and stylized text, and
 it cannot tell a logo from a drawing.
@@ -145,6 +145,13 @@ def longest_common(first: str, second: str) -> int:
     return best
 
 
+def _split_from(token: str, written: str) -> bool:
+    """Whether a reader could have read ``token`` by splitting one of these runs in two."""
+    return any(
+        run != token and (run.startswith(token) or run.endswith(token)) for run in written.split()
+    )
+
+
 def readable(
     source: Sequence[Sequence[ReadWord]],
     output: Sequence[Sequence[ReadWord]],
@@ -154,8 +161,9 @@ def readable(
     """What can still be read of the source, on each page of the output, if anything.
 
     ``known`` holds source words that the file gave, which the reader need not have seen.
-    ``written`` holds, for each page, the new words that the run wrote, casefolded, with their
-    boxes in pixels of the rendered page: none of them may be a word of the source.
+    ``written`` holds, for each page, the new words that the run wrote, as their casefolded runs
+    of letters or digits with spaces between, and their boxes in pixels of the rendered page. None
+    of them may be a word of the source.
     """
     forbidden = {word.casefold() for word in known if len(word) >= SHORTEST}
     forbidden.update(token for page in source for token, _ in tokens(page))
@@ -168,7 +176,9 @@ def readable(
             for token, box in tokens(page)
             if (
                 token in forbidden
-                and not any(token in text and _same_place(box, place) for text, place in new)
+                and not any(
+                    _split_from(token, text) and _same_place(box, place) for text, place in new
+                )
             )
             or any(
                 _same_place(box, place) and longest_common(token, word) >= MOSTLY * len(token)

@@ -52,6 +52,9 @@ rest of its equation."""
 REACH = (0.3, 0.9)
 """Ems below and above a baseline that a block covers, for descenders, accents and limits."""
 
+SAME_PLACE = 0.05
+"""Points: a glyph this close to where a removed one started, with its text, is that glyph."""
+
 PATTERN_KEY = "/DMFormula"
 TILE = 12.0
 """Points: the pattern repeats every tile, a plus sign at a quarter and at three quarters."""
@@ -304,12 +307,23 @@ def without_formulas(glyphs: Iterable[Glyph], formulas: Sequence[Formula]) -> li
 
 
 def glyphs_left(lines: Sequence[Line], formulas: Sequence[Formula]) -> int:
-    """Glyphs of a saved page that start inside a formula's block: none should."""
-    return sum(
-        1
-        for line in lines
-        for glyph in _glyphs(line)
-        for formula in formulas
-        if formula.box[0] <= glyph.origin[0] <= formula.box[2]
-        and formula.box[1] <= glyph.origin[1] <= formula.box[3]
-    )
+    """Glyphs of a saved page that a formula should have taken: one that starts in a block, or one
+    with the text of a removed glyph where that glyph was. A block can stop short of a glyph of its
+    formula, so the place of each glyph counts as well as the block."""
+    removed: dict[str | None, list[tuple[float, float]]] = {}
+    for formula in formulas:
+        for word in formula.words:
+            for glyph in word.glyphs:
+                if not glyph.is_space:
+                    removed.setdefault(glyph.text, []).append(glyph.origin)
+
+    def left(glyph: Glyph) -> bool:
+        x, y = glyph.origin
+        return any(
+            box[0] <= x <= box[2] and box[1] <= y <= box[3] for box in (f.box for f in formulas)
+        ) or any(
+            abs(x - ox) <= SAME_PLACE and abs(y - oy) <= SAME_PLACE
+            for ox, oy in removed.get(glyph.text, ())
+        )
+
+    return sum(1 for line in lines for glyph in _glyphs(line) if left(glyph))

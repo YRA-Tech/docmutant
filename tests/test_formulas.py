@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from dataclasses import replace
 
 import pikepdf
 import pytest
@@ -146,6 +147,15 @@ def test_glyphs_left_in_a_block_are_counted():
     formulas = _found(pdf)
     # ab, cd, and = abc without its space.
     assert glyphs_left(_lines(pdf), formulas) == 8
+
+
+def test_a_glyph_of_a_formula_outside_its_block_is_still_counted():
+    # A block cut back to nothing: the glyphs are found where they were, by their text.
+    pdf = _page(TEXT + FORMULA)
+    formulas = [replace(formula, box=(0.0, 0.0, 0.0, 0.0)) for formula in _found(pdf)]
+    assert glyphs_left(_lines(pdf), formulas) == 8
+    # New text elsewhere, or other text where a glyph was, is not one of them.
+    assert glyphs_left(_lines(_page(TEXT)), formulas) == 0
 
 
 def test_a_full_run_replaces_formulas_and_checks_none_is_left():

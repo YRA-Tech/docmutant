@@ -56,6 +56,12 @@ def test_part_of_a_new_word_at_its_place_is_no_match_but_a_source_fragment_is():
     written = [[("bookshops", (0, 0, 100, 20))], []]
     assert readable(source, output, written=written) == {}
     assert readable(source, output) == {0: ("book",)}
+    # A source word in the middle of a new one is no split: it still counts.
+    middle = [[_at("rebooked", 0, 0)], []]
+    assert readable(
+        source, [[_at("book", 0, 0)], []], written=[[("rebooked", (0, 0, 100, 20))]]
+    ) == {0: ("book",)}
+    assert readable(source, middle) == {}
     # What is left of the source word there still counts, new word or not.
     left = [[_at("Brookside", 0, 0)]]
     assert readable(left, [[_at("rookside", 0, 0)]], written=[[("rookside", (0, 0, 60, 20))]]) == {

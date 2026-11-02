@@ -596,7 +596,7 @@ def _written(
                     if not runs or any(run in source for run in runs):
                         continue
                     xs, ys = zip(*frame.quad(word.box.corners), strict=True)
-                    words.append(("".join(runs), (min(xs), min(ys), max(xs), max(ys))))
+                    words.append((" ".join(runs), (min(xs), min(ys), max(xs), max(ys))))
             pages.append(words)
     finally:
         document.close()
