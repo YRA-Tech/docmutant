@@ -10,10 +10,11 @@ geometry before and after.
 Simple fonts (Type1, MMType1, TrueType) with a ``/Widths`` array are supported,
 Type3 fonts (through their ``/FontMatrix``), and composite (Type0) fonts with
 horizontal writing whose CMap is ``/Identity-H`` or embedded. Form XObjects are
-followed with their ``/Matrix``. Standard fonts that rely on built-in metrics
-instead of ``/Widths``, vertical writing and predefined CMaps other than
-Identity raise ``UnsupportedText``: without their metrics, every later glyph in
-the text object would be misplaced.
+followed with their ``/Matrix``. A standard font of the Helvetica, Times or Courier
+families may leave out ``/Widths``, which ``standard_fonts`` then gives. Symbol and
+ZapfDingbats with no widths, vertical writing and predefined CMaps other than Identity
+raise ``UnsupportedText``: without their metrics, every later glyph in the text object
+would be misplaced.
 
 ``group_lines`` groups the glyphs into words and lines, in drawing order. Each box
 is a rectangle in the frame of its line, so an edge can be measured along or across
@@ -39,6 +40,7 @@ from docmutant.mutate import (
     simple_spaces,
     to_unicode,
 )
+from docmutant.standard_fonts import standard_widths
 
 Point = tuple[float, float]
 WidthSource = Literal["widths", "missing-width", "default-width", "none"]
@@ -362,15 +364,25 @@ def _font(name: str, font: pikepdf.Object) -> _Font:
         return _composite_font(name, font)
     if subtype not in SIMPLE_FONT_SUBTYPES and subtype != "/Type3":
         raise UnsupportedText(f"font {name} has subtype {subtype}")
-    if "/Widths" not in font:
-        raise UnsupportedText(f"font {name} has no /Widths (built-in metrics)")
     descriptor = font.get("/FontDescriptor")
     missing_width = None
     if descriptor is not None and "/MissingWidth" in descriptor:
         missing_width = float(descriptor.MissingWidth)
-    first = int(font.get("/FirstChar", 0))
-    widths = {first + i: float(w) for i, w in enumerate(font.Widths)}
     encoding = font.get("/Encoding")
+    if "/Widths" in font:
+        first = int(font.get("/FirstChar", 0))
+        widths = {first + i: float(w) for i, w in enumerate(font.Widths)}
+    else:
+        standard = standard_widths(str(font.get("/BaseFont", ""))) if subtype != "/Type3" else None
+        if standard is None:
+            raise UnsupportedText(f"font {name} has no /Widths (built-in metrics)")
+        # A standard text font with no encoding of its own uses the standard one.
+        encoding = encoding if encoding is not None else pikepdf.Name.StandardEncoding
+        widths = {
+            code: standard[char]
+            for code, char in encoding_text(encoding).items()
+            if char in standard
+        }
     text = {
         **simple_spaces(encoding),
         **encoding_text(encoding),

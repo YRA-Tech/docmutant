@@ -27,8 +27,8 @@ import math
 import random
 import re
 from collections import Counter
-from collections.abc import Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 import pikepdf
@@ -193,6 +193,9 @@ class _Edit:
     before: float = 0.0
     """``TJ`` number before the first code."""
 
+    gaps: tuple[float, ...] = ()
+    """``TJ`` numbers between the codes, one for each pair, in place of ``tracking``."""
+
 
 @dataclass(frozen=True)
 class _Choice:
@@ -200,6 +203,9 @@ class _Choice:
 
     tier: Tier
     parts: tuple[tuple[_Code, ...], ...]
+    gaps: tuple[float, ...] = ()
+    """Points between each two letters beyond their advances, which put each new letter where the
+    source's was, for a word whose letters the source drew closer than their widths."""
 
 
 @dataclass(frozen=True)
@@ -315,32 +321,83 @@ def _sites(glyphs: Iterable[Glyph]) -> list[list[Glyph]]:
     return list(sites.values())
 
 
+def _unit(glyph: Glyph, direction: tuple[float, float]) -> float:
+    """Points along the baseline per glyph-space unit of a glyph with a width.
+
+    From the bottom edge of its box, which a skew does not lengthen: the box's extent along the
+    baseline also holds the overhang of a slanted glyph, which a wrong scale would take as width.
+    """
+    (x0, y0), (x1, y1) = glyph.box[0], glyph.box[1]
+    return ((x1 - x0) * direction[0] + (y1 - y0) * direction[1]) / glyph.width
+
+
+def _overhang(site: Sequence[Glyph], direction: tuple[float, float]) -> float:
+    """How far the box of a glyph of this site reaches past its width: a slanted glyph's box
+    leans past it, by the same amount for any glyph of the font at that size."""
+    drawn = next((glyph for glyph in site if glyph.width > 0), None)
+    if drawn is None:
+        return 0.0
+    return (
+        extent(drawn, direction)[1]
+        - _along(drawn.origin, direction)
+        - drawn.width * _unit(drawn, direction)
+    )
+
+
 def _scale(site: Sequence[Glyph], direction: tuple[float, float]) -> tuple[float, float]:
     """Points along the baseline per glyph-space unit, and per glyph apart from its width."""
     drawn = next((glyph for glyph in site if glyph.width > 0), None)
-    scale = site[0].tj_unit
-    if drawn is not None:
-        start, end, _, _ = extent(drawn, direction)
-        scale = (end - start) / drawn.width
+    scale = site[0].tj_unit if drawn is None else _unit(drawn, direction)
     return scale, site[0].advance - site[0].width * scale
 
 
-def _natural(word: Word, parts: Sequence[Sequence[_Code]]) -> float:
-    """From the start of the first new glyph to the end of the box of the last."""
+def _ink_changes(word: Word, parts: Sequence[Sequence[_Code]]) -> list[float]:
+    """For each letter, how much further its box reaches with its new code, in points."""
     direction = word.glyphs[0].direction
-    total = spacing = 0.0
+    changes = []
     for site, codes in zip(_sites(word.glyphs), parts, strict=True):
-        scale, spacing_here = _scale(site, direction)
-        if codes:
-            total += sum(code.width for code in codes) * scale + len(codes) * spacing_here
-            spacing = spacing_here
-    return total - spacing
+        scale = _scale(site, direction)[0]
+        changes.extend(
+            (code.width - glyph.width) * scale for glyph, code in zip(site, codes, strict=True)
+        )
+    return changes
+
+
+def _gaps(word: Word) -> tuple[float, ...]:
+    """Points between each two letters of a word beyond the first one's advance: kerning."""
+    direction = word.glyphs[0].direction
+    return tuple(
+        _along(second.origin, direction) - _along(first.origin, direction) - first.advance
+        for first, second in zip(word.glyphs, word.glyphs[1:], strict=False)
+    )
+
+
+def _natural(word: Word, parts: Sequence[Sequence[_Code]]) -> float:
+    """From the start of the first new glyph to the end of the box that reaches furthest: not
+    always the last one's, since a slanted letter can lean past a small one after it."""
+    direction = word.glyphs[0].direction
+    pen = end = 0.0
+    for site, codes in zip(_sites(word.glyphs), parts, strict=True):
+        scale, spacing = _scale(site, direction)
+        reach = _overhang(site, direction)
+        for code in codes:
+            end = max(end, pen + code.width * scale + reach)
+            pen += code.width * scale + spacing
+    return end
 
 
 def _edits(
-    word: Word, parts: Sequence[Sequence[_Code]], start: float, tracking: float
+    word: Word,
+    parts: Sequence[Sequence[_Code]],
+    start: float,
+    tracking: float | Sequence[float],
 ) -> list[_Edit]:
-    """Edits that draw ``parts`` from ``start`` and leave the pen where the source left it."""
+    """Edits that draw ``parts`` from ``start`` and leave the pen where the source left it.
+
+    ``tracking`` is points between each two codes: one number for all, or one for each pair.
+    """
+    steps = None if isinstance(tracking, (int, float)) else tuple(tracking)
+    even = 0.0 if steps is not None else float(tracking)
     direction = word.glyphs[0].direction
     pen = start
     total = sum(len(codes) for codes in parts)
@@ -353,6 +410,7 @@ def _edits(
         wanted = _along(tail.origin, direction) + tail.advance
         scale, spacing = _scale(site, direction)
         before, here = 0.0, source_head
+        first = written
         if codes:
             before = (source_head - pen) / unit
             for code in codes:
@@ -361,7 +419,7 @@ def _edits(
                 written += 1
                 # The next site adds this gap with its own first number, if it is the next.
                 if written < total:
-                    pen += tracking
+                    pen += steps[written - 1] if steps is not None else even
         edits.append(
             _Edit(
                 head.stream,
@@ -371,9 +429,12 @@ def _edits(
                 tail.operand,
                 tail.offset + tail.length,
                 tuple(code.code for code in codes),
-                -tracking / unit,
+                -even / unit,
                 (here - wanted) / unit,
                 before,
+                tuple(-step / unit for step in steps[first : first + len(codes) - 1])
+                if steps is not None
+                else (),
             )
         )
     return edits
@@ -504,20 +565,36 @@ class WordFitter:
                 # Every attempt starts from the source: a stream that it does not edit goes back.
                 source.setdefault(ref, read_stream(self.pdf, ref))
             undone = 0
-            while True:
+
+            def attempt_lines(
+                numbers: Iterable[int],
+                planned: dict[int, _LinePlan] = planned,
+                source: dict[StreamRef, list[Instruction]] = source,
+            ) -> tuple[list[Line], GeometryResult]:
+                """Write the edits of these lines only, and check the page."""
+                chosen = sorted(numbers)
                 for ref, instructions in source.items():
                     edits = [
                         edit
-                        for number in sorted(planned)
+                        for number in chosen
                         for edit in planned[number].edits
                         if edit.stream == ref
                     ]
                     write_stream(self.pdf, ref, _apply(instructions, edits))
                 output = group_lines(trace_page(self.pdf.pages[index]))
-                result = check_boxes(lines, output, settings)
+                return output, check_boxes(lines, output, settings)
+
+            while True:
+                output, result = attempt_lines(planned)
                 if result.passed or not planned:
                     break
                 failed = _failed_lines(result, set(planned))
+                if _unnamed(result) and failed == set(planned) and len(planned) > 1:
+                    # A count of lines names no line: find one that changes it on its own.
+                    culprit = _culprit(
+                        sorted(planned), lambda numbers: _unnamed(attempt_lines(numbers)[1])
+                    )
+                    failed = {culprit} if culprit is not None else failed
                 undone += len(failed)
                 # A violation that names no line says nothing about any line's word starts.
                 if len(failed) < len(planned):
@@ -577,7 +654,13 @@ class WordFitter:
                     ),
                     None,
                 )
-            plan = self._plan_line(line, glyphs, order, run, leader, number in pinned)
+            here = run
+            if number in pinned:
+                # Refused once: its words keep their starts, and its box may not grow toward the
+                # lines around it, which can lie close or overlap, as the parts of a formula do.
+                tolerance = replace(run.settings.tolerance, out=0.0)
+                here = replace(run, settings=replace(run.settings, tolerance=tolerance))
+            plan = self._plan_line(line, glyphs, order, here, leader, number in pinned)
             if plan.tiers:
                 planned[number] = plan
         return planned, run.left, run.blocked
@@ -696,14 +779,15 @@ class WordFitter:
                 if choice == "no fit" and tokens(word):
                     run.blocked.append(word)
                 continue
-            finish = bounds.start + _natural(word, choice.parts)
+            count = sum(len(codes) for codes in choice.parts)
+            finish = bounds.start + _natural(word, choice.parts) + sum(choice.gaps)
             tracking = 0.0
-            if bounds.held:
+            if bounds.held and not choice.gaps:
                 target = min(bounds.high, max(bounds.low, finish))
-                count = sum(len(codes) for codes in choice.parts)
                 if abs(target - finish) > ROUNDING / 2 and count > 1:
                     tracking = (target - finish) / (count - 1)
-            plan.edits.extend(_edits(word, choice.parts, bounds.start, tracking))
+            steps = tuple(gap + tracking for gap in choice.gaps) if choice.gaps else tracking
+            plan.edits.extend(_edits(word, choice.parts, bounds.start, steps))
             plan.choices[position + offset] = choice
             plan.tiers[choice.tier] += 1
         return plan
@@ -834,7 +918,7 @@ class WordFitter:
         for site in sites:
             parts.append(tuple(codes[place : place + len(site)]))
             place += len(site)
-        return _Choice(chosen.tier, tuple(parts))
+        return _Choice(chosen.tier, tuple(parts), chosen.gaps)
 
     def _choose(self, word: Word, bounds: _Bounds | None, run: _Run) -> _Choice | LeftReason:
         """A word for this place, or the reason there is none."""
@@ -844,7 +928,12 @@ class WordFitter:
             if bounds is None:
                 return "no fit"
             choice = self._real_word(word, bounds, run) if self._can_take_real_word(word) else None
-            return choice or self._ladder(word, bounds, run) or "no fit"
+            return (
+                choice
+                or self._ladder(word, bounds, run)
+                or self._kerned(word, bounds, run)
+                or "no fit"
+            )
         reason = self._refusal(word)
         if reason is not None or bounds is None:
             return reason or "no fit"
@@ -869,9 +958,50 @@ class WordFitter:
         return reason or self._real_word(word, free, run, any_length=True) or "no fit"
 
     def _ladder(self, word: Word, bounds: _Bounds, run: _Run) -> _Choice | None:
-        return self._swap(word, "invented word", bounds, run) or self._swap(
-            word, "letter swap", bounds, run
+        # Narrow capitals, as in III, have no capital as narrow: any letter or digit will do.
+        return (
+            self._swap(word, "invented word", bounds, run)
+            or self._swap(word, "letter swap", bounds, run)
+            or self._swap(word, "letter swap", bounds, run, any_kind=True)
         )
+
+    def _kerned(self, word: Word, bounds: _Bounds, run: _Run) -> _Choice | None:
+        """A swap for a word whose letters the source drew closer than their widths, as a formula
+        does: drawn one after the other, no letters of the font fit its box. A swap keeps the count
+        of letters, and each new one starts where the source's did, as a numerator over its
+        denominator. The swap takes letters of close widths, so little else moves."""
+        kern = sum(_gaps(word))
+        if kern >= -ROUNDING:
+            return None
+        room = _Bounds(
+            bounds.start,
+            bounds.end - kern,
+            bounds.low - kern,
+            bounds.high - kern,
+            bounds.held,
+            bounds.any_width,
+        )
+        choice = self._ladder(word, room, run)
+        if choice is None:
+            return None
+        direction = word.glyphs[0].direction
+        advances = []
+        for site, codes in zip(_sites(word.glyphs), choice.parts, strict=True):
+            scale, spacing = _scale(site, direction)
+            advances.extend(code.width * scale + spacing for code in codes)
+        starts = [_along(glyph.origin, direction) for glyph in word.glyphs]
+        gaps = tuple(
+            after - before - advance
+            for before, after, advance in zip(starts, starts[1:], advances, strict=False)
+        )
+        # Each letter keeps its start, so the word ends where its furthest-reaching letter does.
+        end = max(
+            extent(glyph, direction)[1] + change
+            for glyph, change in zip(word.glyphs, _ink_changes(word, choice.parts), strict=True)
+        )
+        if not bounds.low <= end <= bounds.high:
+            return None
+        return _Choice(choice.tier, choice.parts, gaps)
 
     def _refusal(self, word: Word) -> LeftReason | None:
         first = word.glyphs[0]
@@ -914,8 +1044,7 @@ class WordFitter:
         prefix, core, suffix = parts
 
         direction = first.direction
-        box_start, box_end, _, _ = extent(drawn, direction)
-        scale = (box_end - box_start) / drawn.width
+        scale = _unit(drawn, direction)
         spacing = first.advance - first.width * scale
         affixes = prefix + suffix
         affix_width = sum(glyph.width for glyph in affixes)
@@ -933,8 +1062,11 @@ class WordFitter:
         wanted = tokens(word)
         table = self.fonts[key].table(_style(text))
 
+        # A real word's codes are all of the first site, whose box can lean past the last width.
+        reach = _overhang(_sites(word.glyphs)[0], direction)
+
         def natural_end(candidate: _Candidate, count: int) -> float:
-            return start + (candidate.width + affix_width) * scale + (count - 1) * spacing
+            return start + reach + (candidate.width + affix_width) * scale + (count - 1) * spacing
 
         def choices(band: float, lengths: Iterable[int]) -> Iterator[_Candidate]:
             for length in lengths:
@@ -945,7 +1077,7 @@ class WordFitter:
                 # The end of the word, then the width that gives it.
                 lowest = max(low - slack, end - band)
                 highest = min(high + slack, end + band)
-                offset = start + affix_width * scale + (count - 1) * spacing
+                offset = start + reach + affix_width * scale + (count - 1) * spacing
                 widths, candidates = table[length]
                 for candidate in candidates[
                     bisect.bisect_left(widths, (lowest - offset) / scale) : bisect.bisect_right(
@@ -993,8 +1125,11 @@ class WordFitter:
         )
         return _Choice("real word", (codes, *((),) * (len(_sites(word.glyphs)) - 1)))
 
-    def _alternatives(self, glyph: Glyph, tier: Tier) -> list[_Code]:
-        """Codes of the font that could stand for this glyph, at this step of the ladder."""
+    def _alternatives(self, glyph: Glyph, tier: Tier, any_kind: bool = False) -> list[_Code]:
+        """Codes of the font that could stand for this glyph, at this step of the ladder.
+
+        With ``any_kind``, any letter or digit, whatever the glyph's kind or case.
+        """
         kind = _kind(glyph.text)
         table = self.codes.get(glyph.font_key, {})
         source = _code_bytes(glyph)
@@ -1006,7 +1141,9 @@ class WordFitter:
             and _kind(code.text) == kind
             and (code.text is None or code.text.casefold() != folded)
         ]
-        if tier == "invented word":
+        if any_kind:
+            pool = []
+        elif tier == "invented word":
             if kind in ("upper", "lower"):
                 vowel = (glyph.text or "").casefold()[:1] in VOWELS
                 pool = [c for c in pool if ((c.text or "").casefold() in VOWELS) == vowel]
@@ -1021,7 +1158,9 @@ class WordFitter:
             and (code.text is None or code.text.casefold() != folded)
         ]
 
-    def _swap(self, word: Word, tier: Tier, bounds: _Bounds, run: _Run) -> _Choice | None:
+    def _swap(
+        self, word: Word, tier: Tier, bounds: _Bounds, run: _Run, any_kind: bool = False
+    ) -> _Choice | None:
         """Another glyph in place of each letter or digit, each in its own font."""
         direction = word.glyphs[0].direction
         scales: dict[int, float] = {}
@@ -1034,7 +1173,7 @@ class WordFitter:
                 scales[len(ordered)] = scale
                 ordered.append(glyph)
         options = [
-            [] if _kind(glyph.text) == "punctuation" else self._alternatives(glyph, tier)
+            [] if _kind(glyph.text) == "punctuation" else self._alternatives(glyph, tier, any_kind)
             for glyph in ordered
         ]
         if tier == "invented word" and any(
@@ -1047,7 +1186,7 @@ class WordFitter:
         low, high = bounds.low - slack, bounds.high + slack
         spacing = sum(_scale(site, direction)[1] * len(site) for site in _sites(word.glyphs))
         spacing -= _scale(_sites(word.glyphs)[-1], direction)[1]
-        base = bounds.start + spacing
+        base = bounds.start + spacing + _overhang(_sites(word.glyphs)[-1], direction)
 
         for _ in range(SWAP_TRIES):
             picks: list[_Code] = []
@@ -1080,6 +1219,9 @@ class WordFitter:
             for size in sizes:
                 parts.append(tuple(picks[place : place + size]))
                 place += size
+            # Settling counts widths; a slanted letter can reach past the last one.
+            if not low <= bounds.start + _natural(word, parts) <= high:
+                continue
             return _Choice(tier, tuple(parts))
         return None
 
@@ -1146,7 +1288,9 @@ def _bounds(word: Word, following: Word | None, settings: BoxSettings) -> _Bound
         em = max(last.em, following.glyphs[0].em)
         minimum = settings.word_gap.limit(em) if settings.word_gap is not None else 0.0
         floor = min(minimum, signed_gap(word.box, following.box))
-        high = min(high, next_start - floor - 2 * MARGIN)
+        # The oracle allows a gap ROUNDING under its floor. At a tight gap, as between slanted
+        # words whose boxes overlap, a word as wide as the source's must fit.
+        high = min(high, next_start - floor + ROUNDING - MARGIN)
         if not held:
             low = max(low, next_start - LINE_GAP * em + 2 * MARGIN)
     return None if low > high else _Bounds(start, end, low, high, held)
@@ -1174,6 +1318,25 @@ def _failed_lines(result: GeometryResult, planned: set[int]) -> set[int]:
         if violation.kind == "line-gap" and violation.other is not None:
             named.add(violation.other)
     return (named & planned) or set(planned)
+
+
+def _unnamed(result: GeometryResult) -> bool:
+    """Whether a violation names no line, as when lines join or split."""
+    return any(violation.line is None for violation in result.violations)
+
+
+def _culprit(numbers: Sequence[int], breaks: Callable[[Sequence[int]], bool]) -> int | None:
+    """One of ``numbers``, which break the page together, whose edits break it alone: found by
+    halving. None if it takes lines from both halves."""
+    while len(numbers) > 1:
+        half = len(numbers) // 2
+        if breaks(numbers[:half]):
+            numbers = numbers[:half]
+        elif breaks(numbers[half:]):
+            numbers = numbers[half:]
+        else:
+            return None
+    return numbers[0] if numbers else None
 
 
 def draws_text(form: pikepdf.Stream, resources: pikepdf.Object | None, seen: frozenset) -> bool:
@@ -1306,7 +1469,7 @@ def _rewrite(instruction: Instruction, edits: Sequence[_Edit]) -> list[Instructi
             write_number(edit.before)
             for number, code in enumerate(edit.codes):
                 if number:
-                    write_number(edit.tracking)
+                    write_number(edit.gaps[number - 1] if edit.gaps else edit.tracking)
                 write(code)
             write_number(edit.after)
             if edit.last_operand != operand:

@@ -356,8 +356,12 @@ Under `all`, a word goes down a ladder until something fits:
 2. an invented word: each letter replaced by one of its case and of its kind
    (vowel or consonant), each digit by a digit;
 3. a letter swap: the same, with any letter;
-4. a substitute font with more glyphs (see 5.3), and the ladder again;
-5. a stop.
+4. a swap with any letter or digit, whatever its case or kind: a word of narrow
+   capitals, such as `III`, has no capital as narrow;
+5. a swap for a word that the source draws tighter than its letters' widths, as a
+   formula does: each new letter starts where the source's did;
+6. a substitute font with more glyphs (see 5.3), and the ladder again;
+7. a stop.
 
 The manifest counts the words at each step, because invented words and swaps read
 as nonsense: they keep the file private, but they are not the plausible content
@@ -385,10 +389,12 @@ The text-position tracker computes the boxes from font metrics (see 5.2).
 | `bug-repro` | not checked, unless the user sets it | | | | | `best-effort`: the oracle must be able to keep the trigger, and what stays goes in the evidence | `pinned` |
 | `metamorphic` | `word` | `exact`, unless box position is the variable | 0 | `fixed` | defaults | does not apply: text changes only as the family says | `pinned` |
 | `training` | `line`; `word` is allowed | `exact`; `contain` and `±d` are allowed because labels are rebuilt from the output | 0.02 em | `fixed`; `free` is allowed | defaults | `best-effort`; `all` is allowed | `pinned`; `moved` is allowed |
-| `privacy` | `line` | `exact`; at level 2, at least `±` half the grid step | 0.02 em | `fixed`; `free` is allowed | defaults | `all` | `moved` |
+| `privacy` | `line` | `±1`; `exact` is allowed; at level 2, at least `±` half the grid step | 0.02 em | `fixed`; `free` is allowed | defaults | `all` | `moved` |
 
 `privacy` uses `line` and `moved` because a replacement that keeps the width of
-each word narrows down what the original word could have been. On the sample, the
+each word narrows down what the original word could have been. Its tolerance is
+`±1`, less than a letter, because at `exact` a lone digit whose width no other glyph
+of its font has cannot change: on the sample, one such stopped a receipt. On the sample, the
 system dictionary holds a median of 83 words within 0.005 em of a source word's
 width, and 10 or fewer for one word in five.
 
@@ -469,7 +475,7 @@ other glyph.
 
 Built (`tracker.py`): page content streams and the form XObjects they draw
 (with each form's `/Matrix`, nested forms included), with simple fonts that
-have `/Widths`, Type3 fonts (through their `/FontMatrix`), and composite fonts
+have `/Widths` or are of the Helvetica, Times or Courier families, Type3 fonts (through their `/FontMatrix`), and composite fonts
 with horizontal writing whose CMap is `/Identity-H` or embedded (codes of 1 to
 4 bytes, `/W`, `/DW`). Each glyph names the stream that holds its instruction,
 so a glyph in a form is addressed in the form, not in the page. Each glyph also records its text render mode (3 is the invisible
@@ -494,6 +500,16 @@ through the Adobe Glyph List. A font with no named base has a built-in encoding,
 which only its program knows, so only its `/Differences` count. A name that says
 nothing, such as `g12`, gives no text. Each box is a rectangle in the frame of its line, as 4.4
 requires, and a line box is the union of its word boxes.
+
+A standard font may leave out `/Widths`, since every reader knows them. For Helvetica,
+Times and Courier, `standard_fonts.py` gives their widths by character, through the
+font's encoding, or the standard encoding if it names none; a name such as `Arial,Bold`
+counts as its family. The widths come from the Liberation fonts, whose advance widths
+match these families by design, and `scripts/standard_widths.py` writes the table again.
+Five symbols where Arial and Times New Roman differ from Adobe's fonts (`¯ ± µ · ÷`) take
+Adobe's widths. pdfium's built-in fonts agree on all 216 characters it measures in each
+of the six tables, apart from `«` and `»` in Helvetica and `@` in Helvetica-Bold.
+Symbol and ZapfDingbats with no widths still stop a run.
 
 On the sample documents, 99% of the words match pdfium's exactly. In the rest,
 pdfium joins words hyphenated across lines, expands ligatures or leaves out a
@@ -556,6 +572,13 @@ Planned, in order:
   (`1.0`, `III`, `III,`) whose stretch has too little room for any wider letters.
   31 lines kept their word starts because their gaps had too little room. One further page cannot be
   read at all, because a font relies on built-in metrics (see 5.2).
+
+  Since then, the narrow words take any letter, and the standard fonts have widths. On
+  12 sample files as whole documents under `privacy`, 10 pass at `exact` and 11 at `±1`,
+  up from 8 and 9; the receipt with the lone `1` passes at `±1` only. The one that
+  stops is a paper whose displayed formulas draw a fraction's parts as separate slanted
+  glyphs: 8 words on 3 pages stay, at `±1`. Its math font holds a few letters only, and
+  one formula's lines join whatever changes in it.
 - **Glyph availability** (partial): fitted replacement uses only codes that the
   document shows in that font, which needs no font parsing but leaves out glyphs
   a full font could draw. Planned: subset fonts lack glyphs that the document
@@ -578,8 +601,16 @@ Planned, in order:
 
 A page under coverage `all` gets four attempts, each with other words, because whether
 a tight line has room for its last word depends on the words before it. A line that
-the geometry oracle refuses keeps its word starts in the next attempt: the words of a
-formula lie too close to move. A substitute draws a math letter as its plain letter.
+the geometry oracle refuses keeps its word starts in the next attempt, and its box may
+not grow: the words of a formula lie too close to move, and its lines can overlap. When
+lines join or split, the oracle names no line, and the fitter finds one whose words
+change the count on their own, by halving, instead of putting back the whole page.
+
+A slanted letter's box leans past its width, so the fitter measures a glyph's scale
+along the bottom of its box, and a word's end at the box that reaches furthest, which
+need not be the last one: in a formula, a slanted letter can lean past a small one after
+it. A word whose gap to the next is tighter than the minimum, as between slanted words
+whose boxes overlap, may end as far as the source's did, within the oracle's rounding. A substitute draws a math letter as its plain letter.
 A symbol that it lacks, or a code whose text is not known, draws nothing and keeps its
 advance. A letter that it lacks refuses the substitute, so that a font of another
 script does not lose its text.
@@ -962,6 +993,11 @@ and Caladea). No dependency's code is copied into docmutant's files.
 - Whether to read languages other than English. Tesseract runs with its default model,
   which reads other Latin scripts less well and other scripts not at all.
 - What else could count as a code, such as a PDF417 stack of unequal rows.
+- How to change displayed formulas, whose parts are separate glyphs set close together and
+  whose math fonts hold few letters. A swap that keeps each glyph's start fits most of them;
+  on the sample, 8 words on 3 pages of one paper still do not change.
+- Whether `±1` is the right tolerance for `privacy`. It lets a lone digit change, and no
+  sample file needed more, but a line box that moves by a point is less exact than before.
 - What counts as a graphic. Its limits come from 12 files: 12 to 144 pt, two colours, 1.25 for
   a word. A logo of one colour stays, and so does one under 12 pt, while a compact chart of
   two colours becomes a block. A block keeps a graphic's size and place, which can still say

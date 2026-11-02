@@ -443,7 +443,8 @@ def main(argv: list[str] | None = None) -> int:
     anonymize.add_argument(
         "--tolerance",
         type=_tolerance,
-        help="how far each edge of a line box may move: exact, contain or ±d in points",
+        help="how far each edge of a line box may move: exact, contain or ±d in points "
+        "(default: ±1 under privacy, exact under training)",
     )
     anonymize.add_argument("--coverage", choices=["best-effort", "all"])
     anonymize.add_argument("--word-starts", choices=["pinned", "moved"])

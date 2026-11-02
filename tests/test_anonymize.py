@@ -385,7 +385,9 @@ def test_a_run_writes_nothing_when_a_word_cannot_change():
 
 def test_a_page_with_a_font_that_cannot_be_traced_stops_the_run():
     pdf = _source()
-    del pdf.pages[0].obj.Resources.Font.F1["/Widths"]
+    font = pdf.pages[0].obj.Resources.Font.F1
+    del font["/Widths"]
+    font.BaseFont = pikepdf.Name.Symbol
     result = _run(pdf)
     assert result.data is None
     assert any("cannot be traced" in problem for problem in result.problems)

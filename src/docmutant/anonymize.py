@@ -33,7 +33,7 @@ from docmutant.coverage import (
     residual_text,
 )
 from docmutant.fit import CoverageStop, FitPolicy, WordFitter
-from docmutant.geometry import BoxSettings, BoxTolerance, check_boxes
+from docmutant.geometry import BoxSettings, BoxTolerance, check_boxes, within
 from docmutant.graphics import (
     graphics,
     replace_graphics,
@@ -86,10 +86,14 @@ class Profile:
     """Whether source words that a person could read in the rendered output stop the run."""
 
 
+PRIVACY_TOLERANCE = 1.0
+"""Points that each edge of a line may move under ``privacy`` unless the user says otherwise. Less
+than a letter: at exact, a lone digit whose width no other glyph has cannot change."""
+
 PROFILES = {
     "privacy": Profile(
         "privacy",
-        BoxSettings("line", tracking_limit=0.02),
+        BoxSettings("line", tolerance=within(PRIVACY_TOLERANCE), tracking_limit=0.02),
         FitPolicy("all", "moved"),
         substitute_fonts=True,
         replace_images=True,

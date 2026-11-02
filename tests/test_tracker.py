@@ -203,11 +203,54 @@ def test_text_that_cannot_be_placed(content, message):
     pdf = _pdf(content)
     fonts = pdf.pages[0].obj.Resources.Font
     fonts.F2 = pikepdf.Dictionary(Type=pikepdf.Name.Font, Subtype=pikepdf.Name.CIDFontType2)
+    # The standard fonts give no widths for Symbol: only its program knows them.
     fonts.F3 = pikepdf.Dictionary(
-        Type=pikepdf.Name.Font, Subtype=pikepdf.Name.Type1, BaseFont=pikepdf.Name.Helvetica
+        Type=pikepdf.Name.Font, Subtype=pikepdf.Name.Type1, BaseFont=pikepdf.Name.Symbol
     )
     with pytest.raises(UnsupportedText, match=message):
         trace_page(pdf.pages[0])
+
+
+def _standard(base_font: str, content: bytes, **keys) -> list:
+    pdf = pikepdf.Pdf.new()
+    page = pdf.add_blank_page()
+    font = pikepdf.Dictionary(
+        Type=pikepdf.Name.Font, Subtype=pikepdf.Name.Type1, BaseFont=pikepdf.Name(base_font), **keys
+    )
+    page.obj.Resources = pikepdf.Dictionary(Font=pikepdf.Dictionary(F1=font))
+    page.obj.Contents = pdf.make_stream(b"BT /F1 10 Tf " + content + b" Tj ET")
+    return trace_page(pdf.pages[0])
+
+
+@pytest.mark.parametrize(
+    ("base_font", "widths"),
+    [
+        # Adobe's widths: A, V and the space.
+        ("/Helvetica", (667, 667, 278)),
+        ("/Helvetica-BoldOblique", (722, 667, 278)),
+        ("/ABCDEF+Arial,Bold", (722, 667, 278)),
+        ("/Times-Italic", (611, 611, 250)),
+        ("/TimesNewRomanPS-BoldMT", (722, 722, 250)),
+        ("/Courier", (600, 600, 600)),
+    ],
+)
+def test_a_standard_font_without_widths_has_its_standard_ones(base_font, widths):
+    glyphs = _standard(base_font, b"(AV )", Encoding=pikepdf.Name.WinAnsiEncoding)
+    assert [glyph.width for glyph in glyphs] == list(widths)
+    assert _close(glyphs[1].origin, (widths[0] / 100, 0))
+
+
+def test_a_standard_font_without_an_encoding_uses_the_standard_one():
+    # Code 39 is a quote that leans in StandardEncoding, and a straight one in WinAnsi.
+    (glyph,) = _standard("/Helvetica", b"(')")
+    assert (glyph.text, glyph.width) == ("\u2019", 222)
+    (glyph,) = _standard("/Helvetica", b"(')", Encoding=pikepdf.Name.WinAnsiEncoding)
+    assert (glyph.text, glyph.width) == ("'", 191)
+
+
+def test_adobe_widths_stand_where_arial_differs_from_helvetica():
+    (glyph,) = _standard("/Helvetica", b"(\261)", Encoding=pikepdf.Name.WinAnsiEncoding)
+    assert (glyph.text, glyph.width) == ("±", 584)
 
 
 def _type0_pdf(
