@@ -34,6 +34,12 @@ from docmutant.coverage import (
 )
 from docmutant.fit import CoverageStop, FitPolicy, WordFitter
 from docmutant.geometry import BoxSettings, BoxTolerance, check_boxes
+from docmutant.graphics import (
+    graphics,
+    replace_graphics,
+    solid_images,
+    text_places,
+)
 from docmutant.layers import (
     clean_layers,
     drawn,
@@ -74,7 +80,7 @@ class Profile:
     """Whether a word left, or a word that pdfium still reads, stops the run."""
 
     replace_drawings: bool = False
-    """Whether glyph shapes become new text, and machine-readable codes flat blocks."""
+    """Whether glyph shapes become new text, and graphics and machine-readable codes flat blocks."""
 
     reads_render: bool = False
     """Whether source words that a person could read in the rendered output stop the run."""
@@ -216,6 +222,22 @@ def _fill(space: object, depth: int) -> int:
     return 0xE6 if depth == 8 else 0xFF
 
 
+def shows_light(image: pikepdf.Object) -> bool:
+    """Whether a flat image of this colour space is light. One with a palette of dark colours only
+    is not: without a mask that gives it a shape, it would be a dark block."""
+    space = image.get("/ColorSpace")
+    family = space[0] if isinstance(space, pikepdf.Array) else space
+    if family not in ("/Indexed", "/I"):
+        return True
+    data, size, inks = _palette(space)
+    index = _lightest(space) if int(image.get("/BitsPerComponent", 8)) == 8 else 0
+    colour = data[index * size : (index + 1) * size]
+    if len(colour) < size:
+        return False
+    amount = sum(colour) / (255 * size)
+    return amount <= 0.2 if inks else amount >= 0.8
+
+
 def _components(space: object) -> int:
     family = space[0] if isinstance(space, pikepdf.Array) else space
     if family in ("/Indexed", "/I", "/Separation", "/CalGray", "/DeviceGray", "/G"):
@@ -306,9 +328,15 @@ def _flat_image(image: pikepdf.Stream, mask: bool) -> None:
         image.BitsPerComponent = depth
 
 
-def replace_all_images(pdf: pikepdf.Pdf) -> int:
-    """Replace every image with a flat one that hides nothing the source's image did not."""
+def replace_all_images(pdf: pikepdf.Pdf, solid: Iterable[tuple[int, int]] = ()) -> int:
+    """Replace every image with a flat one that hides nothing the source's image did not.
+
+    The images in ``solid`` lose their soft masks first, and so become blocks: see
+    ``graphics.solid_images``.
+    """
     images = image_xobjects(pdf)
+    for objgen in solid:
+        del pdf.get_object(objgen)["/SMask"]
     masks = {
         image[key].objgen
         for image in images
@@ -659,10 +687,13 @@ def anonymize(
         mutations.append({"operator": "substitute-fonts", "params": {"fonts": len(substituted)}})
     else:
         substituted = dict(fitter.substituted)
-    paragraphs = codes = 0
+    paragraphs = codes = blocks = 0
+    text = text_places(original, source_lines)
     if profile.replace_drawings:
         codes = replace_machine_codes(pdf)
         mutations.append({"operator": "replace-machine-codes", "params": {"codes": codes}})
+        blocks = replace_graphics(pdf, text)
+        mutations.append({"operator": "replace-graphics", "params": {"graphics": blocks}})
         try:
             outlines = text_from_outlines(
                 pdf,
@@ -677,11 +708,16 @@ def anonymize(
         mutations.append({"operator": "text-from-outlines", "params": {"items": paragraphs}})
     images = 0
     if profile.replace_images:
-        images = replace_all_images(pdf)
+        solid = {
+            objgen
+            for objgen in solid_images(original, text)
+            if shows_light(original.get_object(objgen))
+        }
+        images = replace_all_images(pdf, solid)
         mutations.append(
             {
                 "operator": "replace-image-samples",
-                "params": {"style": "flat, light", "images": images},
+                "params": {"style": "flat, light", "images": images, "made_solid": len(solid)},
             }
         )
     dropped = _drop_unused_form_fonts(pdf) if profile.substitute_fonts else 0
@@ -701,14 +737,17 @@ def anonymize(
     if profile.replace_drawings:
         left = outline_items(output)
         over = {index: count for index, count in drawings.items() if count > DRAWN_TEXT}
+        graphics_left = graphics(output, text)
         checks.append(
             Check(
                 "drawn-text",
                 "docmutant content scan",
-                not left and not over,
+                not left and not over and not graphics_left,
                 {
                     "items_replaced": paragraphs,
                     "items_left": sum(left.values()),
+                    "graphics_replaced": blocks,
+                    "graphics_left": sum(graphics_left.values()),
                     "limit": DRAWN_TEXT,
                     "largest": max(drawings.values(), default=0),
                 },
@@ -716,6 +755,9 @@ def anonymize(
         )
         problems.extend(
             f"{label}: {count} outline items left" for label, count in sorted(left.items())
+        )
+        problems.extend(
+            f"{label}: {count} graphics left" for label, count in sorted(graphics_left.items())
         )
         problems.extend(
             f"page {index + 1}: {count} curved shapes remain, too large to be glyphs; "
@@ -747,6 +789,7 @@ def anonymize(
         images=profile.replace_images,
         drawings=profile.replace_drawings,
         tolerance=profile.settings.tolerance.out,
+        text=text,
     )
     check, damage = _check_difference(source, data, regions)
     checks.append(check)
@@ -782,6 +825,8 @@ def anonymize(
         replaced.append(f"{paragraphs} outline items: paragraphs of new text")
     if codes:
         replaced.append(f"{codes} machine-readable codes: flat blocks")
+    if blocks:
+        replaced.append(f"{blocks} graphics: flat blocks")
     if profile.replace_images and images:
         replaced.append(f"{images} images: flat")
     if substituted:

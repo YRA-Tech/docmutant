@@ -116,9 +116,9 @@ Replace the content of a whole document, in every layer (see 5.6), under the
 
 1. Refuse a page that cannot be traced.
 2. Fit new words on every page (see 5.3).
-3. Under `privacy`: give every font a substitute, turn machine-readable codes into
-   flat blocks and text drawn as outlines into paragraphs of new text (see 5.5), and
-   replace every image.
+3. Under `privacy`: give every font a substitute, turn machine-readable codes and
+   graphics such as logos into flat blocks and text drawn as outlines into paragraphs
+   of new text (see 5.5), and replace every image.
 4. Clean the hidden layers (see 5.6).
 5. Save, open the saved bytes again, and run every oracle on them (see 5.8).
 
@@ -133,8 +133,8 @@ Replacement is not yet of the same type (a name for a name): that takes semantic
 selection (see 5.7). `--vocabulary` names a file of real words; without one, every
 word is invented. `--keep-images` and `--keep-drawings` keep what would stop the
 claim, and the file then has no `privacy` claim and no reading of its render.
-`--keep-drawings` keeps outlines and codes exact, which is what `training` always
-does.
+`--keep-drawings` keeps outlines, codes and graphics exact, which is what `training`
+always does.
 
 A `privacy` run needs Tesseract, to read the rendered pages (see 5.5). Without it the
 run stops, because a check that did not look must not pass. The output's bytes depend
@@ -592,8 +592,13 @@ picture classification; for scanned text, replace the text in the image, not
 only the pixels.
 
 Under `privacy`, every image becomes flat and light at the same size, depth and colour
-space, and a mask becomes empty: its shape can show a logo or a signature, and an image
-that was see-through in places must not become a block that hides the text under it.
+space, and a mask becomes empty: its shape can show a logo or a signature. An image with
+a soft mask that no line of text crosses loses the mask instead, and is a block like any
+other image. Otherwise an icon or a logo with a see-through background would vanish, and
+on the sample so did a whole card. One that text crosses keeps its empty mask, and shows
+nothing, so that it hides none of the text under it. So does one whose palette holds only dark
+colours, since its mask is its shape: on the sample, five black icons became black squares
+that the render difference passed, at 0.09% of a page.
 The fill depends on the colour space, because a sample counts ink in CMYK, where the
 number that is mid-grey in RGB is close to black. An image inside a soft mask counts as a
 mask too. Its brightness says where a fill shows through, so a light one lets the fill show
@@ -642,7 +647,6 @@ What stays, and the oracle `drawn-text` runs on the saved file:
 - No item is left, and no page keeps more than 100 curved shapes. These would be too
   large to be glyphs. The count says that someone must look, not what is there.
 - A lone glyph stays, because it spells little and a bullet looks like one.
-- A logo of several colours can stay in part: on the sample, a shield and a red X.
 - Curves drawn with strokes, such as a signature, stay. So does text used as a clip
   for a picture.
 
@@ -660,6 +664,42 @@ file. On the sample this finds the one QR code, which still decoded in an earlie
 output that had passed every other check, and nothing else, among tables and charts.
 It does not find a code of round dots, which is an outline item instead; a skewed code; or
 one in several colours. A code in an image goes with the image.
+
+**Graphics** (`graphics.py`). A logo says whose document it is, whatever its words say. And
+the symbol on an icon's badge looks like a short word to the outline items, which made two
+letters of each one on the sample. So under `privacy`, each compact graphic becomes a flat,
+light block of its extent, the grey of a flat image. A graphic is a group of marks within
+2 pt of each other: fills, strokes and shadings, and the images among them. Fills, strokes
+and shadings of two colours or more must draw it, and it must be 12 to 144 pt on its longer
+side. These stay:
+
+- a graphic that a line of text crosses: a block must not hide the source's words, which
+  the run changes where they are;
+- a mark over 144 pt, such as a card or a background, and a straight one no thicker than
+  1.5 pt, such as a rule. Neither joins anything, so the line that links a column of icons
+  does not make them one tall group;
+- a group over 144 pt, such as a table, a banner or a chart, and one under 12 pt, such as a
+  check box or a bullet;
+- a group of one colour: an outlined word, and also a logo of one colour;
+- what a soft mask or a pattern draws. The one is a shape, not a picture; the other repeats.
+
+An outline item more than 1.25 times as wide as it is high is a word: it joins no graphic,
+and becomes a paragraph. On the sample, words are 1.4 times as wide as high or more, and
+symbols and emblems 1.1 or less. A symbol joins its badge. Images add no colour, because
+each is flat already, and they stay on the block. Only what a clip let show counts, and
+groups whose extents touch become one, because a block covers the corners of its extent.
+
+A block is drawn where the graphic's first mark was, outside the groups open there, so a
+label drawn on a button stays on its block. A paragraph drawn before a graphic that it
+reaches into can be partly covered: on the sample, the word left of a logo's X. The oracle
+`drawn-text` looks for graphics left on the saved file, and the render difference lets a
+block get lighter than what it covers, but not darker.
+
+On the sample, 22 graphics in 4 files become blocks: logos, icons on badges and a few buttons,
+and the lesson plan's outline items fall from 19 to 11, since its icons no longer become
+letters. 20 images in 2 files become solid. The same files pass and stop as before, under
+`training` and `--keep-images` too. A logo of one colour stays, and so does an icon of one
+colour, which can still become a letter. A block keeps a graphic's size and place.
 
 **Reading the render** (`reading.py`). Every other oracle reads the file's operators and
 objects, so what they cannot see they pass, and three times a page has passed them with
@@ -761,7 +801,7 @@ region and every text region that stayed, with the detector's confidence.
 | file identifier: not the source's | built |
 | structure: the tag tree has the same shape and the same marked-content IDs | built |
 | image geometry: each page draws images of the same sizes and depths. The filter can change, under `privacy`: a flat image is Flate | built |
-| drawn text: no outline item is left, and no page keeps so many curved shapes that someone should look (see 5.5) | built |
+| drawn text: no outline item or graphic is left, and no page keeps so many curved shapes that someone should look (see 5.5) | built |
 | machine codes: no QR code, Data Matrix or barcode drawn as paths is left (see 5.5) | built |
 | readable text: OCR of the render reads no source word in the output, and has read something (see 5.5) | built |
 | render difference: pypdfium2 renders source and saved file, and what a run does not change must look the same (see below), with per-page `compared`, `changed_pixels_ratio`, `mean_abs_error`, `darkened` and `lines_lost` | built |
@@ -777,21 +817,22 @@ border, and one where an image in a soft mask spread a grey block across a card.
 **The render difference** (`difference.py`) compares the pictures at 144 dpi. It leaves out
 the places that the run means to change, all taken from the source: the lines of text, with
 a place set by their font size because a font's own numbers can be wrong; outline items;
-machine-readable codes; annotations that show an appearance; and images. Whatever a run
-keeps stays in the comparison, so under `--keep-images` not a pixel of an image may change.
+machine-readable codes; annotations that show an appearance; and images and graphics.
+Whatever a run keeps stays in the comparison, so under `--keep-images` not a pixel of an
+image may change.
 It stops the run when:
 
 - more than 100 pixels of a page changed by more than 32 grey levels outside those places.
   New text that strays out of the source's places counts, because the output's own places
   are not left out;
-- more than 1% of a page got darker by more than 64 levels where an image was. Those places
-  are left out of the first measure, so a black image would otherwise pass. Getting lighter
-  is what a flat image does;
+- more than 1% of a page got darker by more than 64 levels where an image or a graphic was.
+  Those places are left out of the first measure, so a black image would otherwise pass.
+  Getting lighter is what a flat image and a block do;
 - a line of text keeps under 20% of its ink, unless it is over an image. White text on a dark
   picture cannot stand out on a flat, light one.
 
 On the 9 sample files that pass, the most any page changed is 19 pixels, and the most that
-got darker is 0.044% of a page. A soft mask left light stops one of them at 10%, and black
+got darker is 0.011% of a page. A soft mask left light stops one of them at 10%, and black
 images stop two others, at up to 45% of a page.
 
 It does not see what stays inside a place: a word that crosses a border within its own line,
@@ -921,6 +962,10 @@ and Caladea). No dependency's code is copied into docmutant's files.
 - Whether to read languages other than English. Tesseract runs with its default model,
   which reads other Latin scripts less well and other scripts not at all.
 - What else could count as a code, such as a PDF417 stack of unequal rows.
+- What counts as a graphic. Its limits come from 12 files: 12 to 144 pt, two colours, 1.25 for
+  a word. A logo of one colour stays, and so does one under 12 pt, while a compact chart of
+  two colours becomes a block. A block keeps a graphic's size and place, which can still say
+  something to someone who knows the source.
 - How wide a gap counts as structure. The 0.75 em for holding a gap under word
   starts `moved` is an estimate: a justified word space can come close to it, and
   table cells can be closer.

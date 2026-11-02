@@ -605,8 +605,8 @@ def clean_layers(pdf: pikepdf.Pdf, seed: int, avoid: Iterable[str]) -> LayerRepo
     return LayerReport(dict(removed), dict(rewritten))
 
 
-def soft_mask_images(pdf: pikepdf.Pdf) -> set[tuple[int, int]]:
-    """The images that a soft mask draws: they say where a page shows, and show nothing."""
+def _soft_masks(pdf: pikepdf.Pdf) -> tuple[set[tuple[int, int]], set[tuple[int, int]]]:
+    """The forms and the images that soft masks draw."""
     found: set[tuple[int, int]] = set()
     seen: set[tuple[int, int]] = set()
 
@@ -626,7 +626,17 @@ def soft_mask_images(pdf: pikepdf.Pdf) -> set[tuple[int, int]]:
     for holder, key, value, _ in _walk(pdf):
         if key == "/G" and "/S" in holder and isinstance(value, pikepdf.Stream):
             visit(value)
-    return found
+    return seen, found
+
+
+def soft_mask_images(pdf: pikepdf.Pdf) -> set[tuple[int, int]]:
+    """The images that a soft mask draws: they say where a page shows, and show nothing."""
+    return _soft_masks(pdf)[1]
+
+
+def soft_mask_forms(pdf: pikepdf.Pdf) -> set[tuple[int, int]]:
+    """The forms that a soft mask draws, at any depth. What they paint is a shape, not a picture."""
+    return _soft_masks(pdf)[0]
 
 
 def residual_strings(pdf: pikepdf.Pdf, words: Iterable[str]) -> dict[str, tuple[str, ...]]:

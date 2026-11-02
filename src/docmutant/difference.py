@@ -25,9 +25,9 @@ import pypdfium2 as pdfium
 from PIL import Image, ImageChops, ImageDraw
 
 from docmutant.codes import code_quads
-from docmutant.content import operator_name
+from docmutant.graphics import TextPlaces, graphic_quads, placed, placements, text_places
 from docmutant.mutate import StreamRef
-from docmutant.outlines import Matrix, apply_matrix, multiply, outline_quads
+from docmutant.outlines import Matrix, outline_quads
 from docmutant.tracker import Line, Point
 
 Quad = tuple[Point, Point, Point, Point]
@@ -64,7 +64,6 @@ SOME_INK = 20
 FADED = 0.2
 """The share of a line's ink that must stay, for it not to count as lost."""
 
-_IDENTITY: Matrix = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 _UNIT_SQUARE = ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))
 
 
@@ -74,6 +73,8 @@ class PageRegions:
 
     lines: tuple[Quad, ...] = ()
     images: tuple[Quad, ...] = ()
+    """Images and graphics, which become light."""
+
     other: tuple[Quad, ...] = ()
     """Outline items, machine-readable codes, and annotations that show an appearance."""
 
@@ -95,64 +96,6 @@ class PageDifference:
     lines_lost: int = 0
 
 
-def _placements(
-    page: pikepdf.Page,
-) -> tuple[set[Matrix], dict[tuple[int, int], set[Matrix]]]:
-    """Where a page draws its images and its forms, including those in soft masks."""
-    images: set[Matrix] = set()
-    forms: dict[tuple[int, int], set[Matrix]] = {}
-
-    def form(
-        stream: pikepdf.Object,
-        resources: pikepdf.Object | None,
-        ctm: Matrix,
-        chain: frozenset[tuple[int, int]],
-    ) -> None:
-        placed = multiply(tuple(float(value) for value in stream.get("/Matrix", _IDENTITY)), ctm)
-        here = forms.setdefault(stream.objgen, set())
-        if stream.objgen not in chain and placed not in here:
-            here.add(placed)
-            visit(stream, stream.get("/Resources", resources), placed, chain | {stream.objgen})
-
-    def visit(
-        stream: pikepdf.Object,
-        resources: pikepdf.Object | None,
-        outer: Matrix,
-        chain: frozenset[tuple[int, int]],
-    ) -> None:
-        ctm = outer
-        stack: list[Matrix] = []
-        xobjects = resources.get("/XObject") if resources is not None else None
-        states = resources.get("/ExtGState") if resources is not None else None
-        for instruction in pikepdf.parse_content_stream(stream):
-            operator = operator_name(instruction)
-            if operator == "q":
-                stack.append(ctm)
-            elif operator == "Q":
-                if stack:
-                    ctm = stack.pop()
-            elif operator == "cm":
-                ctm = multiply(tuple(float(value) for value in instruction.operands), ctm)
-            elif operator == "INLINE IMAGE":
-                images.add(ctm)
-            elif operator == "gs" and states is not None:
-                state = states.get(instruction.operands[0])
-                mask = state.get("/SMask") if state is not None else None
-                if isinstance(mask, pikepdf.Dictionary) and "/G" in mask:
-                    form(mask["/G"], resources, ctm, chain)
-            elif operator == "Do" and xobjects is not None:
-                inner = xobjects.get(instruction.operands[0])
-                if not isinstance(inner, pikepdf.Stream):
-                    continue
-                if inner.get("/Subtype") == "/Image":
-                    images.add(ctm)
-                elif inner.get("/Subtype") == "/Form":
-                    form(inner, resources, ctm, chain)
-
-    visit(page, page.obj.get("/Resources"), _IDENTITY, frozenset())
-    return images, forms
-
-
 def line_quad(line: Line) -> Quad:
     """The place of a line: all that its glyphs can draw, whatever their font says about them."""
     ux, uy = line.box.direction
@@ -164,10 +107,6 @@ def line_quad(line: Line) -> Quad:
         glyph.origin[1] * ux - glyph.origin[0] * uy + REACH_UP * glyph.em for glyph in glyphs
     )
     return replace(line.box, bottom=min(line.box.bottom, low), top=max(line.box.top, high)).corners
-
-
-def _placed(matrix: Matrix, quad: Quad) -> Quad:
-    return tuple(apply_matrix(matrix, x, y) for x, y in quad)
 
 
 def _annotation_quads(page: pikepdf.Page) -> Iterable[Quad]:
@@ -184,6 +123,19 @@ def _annotation_quads(page: pikepdf.Page) -> Iterable[Quad]:
             yield ((x0, y0), (x1, y0), (x1, y1), (x0, y1))
 
 
+def _on_page(
+    found: Sequence[tuple[StreamRef, Quad]],
+    index: int,
+    forms: Mapping[tuple[int, int], Iterable[Matrix]],
+) -> Iterable[Quad]:
+    """Where page ``index`` shows these places, which are in the frames of their streams."""
+    for ref, quad in found:
+        if ref.kind == "page" and ref.page_index == index:
+            yield quad
+        elif ref.kind != "page":
+            yield from (placed(matrix, quad) for matrix in forms.get(ref.objgen, ()))
+
+
 def changed_regions(
     pdf: pikepdf.Pdf,
     lines: Mapping[int, Sequence[Line]],
@@ -191,29 +143,33 @@ def changed_regions(
     images: bool,
     drawings: bool,
     tolerance: float = 0.0,
+    text: TextPlaces | None = None,
 ) -> list[PageRegions]:
     """What a run may change on each page of ``pdf``, its source, under these settings.
 
-    ``tolerance`` is how far an edge of a line may move, in points. Whatever a run keeps stays in
-    the comparison, so a run that keeps its images must not change a pixel of them.
+    ``tolerance`` is how far an edge of a line may move, in points, and ``text`` is where the
+    source shows text, if already found. Whatever a run keeps stays in the comparison, so a run
+    that keeps its images must not change a pixel of them.
     """
     streams: list[tuple[StreamRef, Quad]] = []
+    blocks: list[tuple[StreamRef, Quad]] = []
     if drawings:
         streams = [*outline_quads(pdf), *code_quads(pdf)]
+        blocks = graphic_quads(pdf, text or text_places(pdf, lines))
     regions: list[PageRegions] = []
     for index, page in enumerate(pdf.pages):
-        image_places, forms = _placements(page)
-        other = list(_annotation_quads(page))
-        for ref, quad in streams:
-            if ref.kind == "page" and ref.page_index == index:
-                other.append(quad)
-            else:
-                other.extend(_placed(matrix, quad) for matrix in forms.get(ref.objgen, ()))
+        image_places, forms = placements(page)
+
+        pictures = [
+            placed(matrix, _UNIT_SQUARE)
+            for matrices in (image_places.values() if images else ())
+            for matrix in matrices
+        ]
         regions.append(
             PageRegions(
                 tuple(line_quad(line) for line in lines[index]),
-                tuple(_placed(matrix, _UNIT_SQUARE) for matrix in image_places) if images else (),
-                tuple(other),
+                (*pictures, *_on_page(blocks, index, forms)),
+                (*_annotation_quads(page), *_on_page(streams, index, forms)),
                 MARGIN + tolerance,
             )
         )

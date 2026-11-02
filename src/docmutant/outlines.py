@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import math
 import random
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 
 import pikepdf
@@ -88,7 +88,7 @@ _FILLS = frozenset({"f", "F", "f*", "B", "B*", "b", "b*"})
 _STROKES = frozenset({"S", "s"})
 _COLOURS = frozenset({"g", "rg", "k", "cs", "sc", "scn"})
 _PLACE = "DMPARAGRAPH"
-"""Stands for a paragraph while groups are cleaned up. Paints, as far as they can tell."""
+"""Stands for a paragraph or a block while groups are cleaned up."""
 
 _TEXT_STATE = frozenset({"Tc", "Tw", "Tz", "TL", "Tf", "Tr", "Ts"})
 _STATE = frozenset(
@@ -360,27 +360,43 @@ def outline_items(pdf: pikepdf.Pdf) -> dict[str, int]:
     return found
 
 
+@dataclass(frozen=True)
+class ItemPlace:
+    """Where an outline item is, in the frame of its stream, and how it is drawn."""
+
+    quad: tuple[Point, Point, Point, Point]
+    paints: frozenset[int]
+    """The operators that paint its shapes."""
+
+    wide: float
+    """Its width over its height, along the direction it is written in."""
+
+
+def item_places(instructions: Sequence[Instruction], unit: float) -> list[ItemPlace]:
+    places = []
+    for item in _items(instructions, unit):
+        x0, y0, x1, y1 = item.box
+        turn = _rotation(item.shapes[0].turn)
+        quad = (
+            apply_matrix(turn, x0, y0),
+            apply_matrix(turn, x1, y0),
+            apply_matrix(turn, x1, y1),
+            apply_matrix(turn, x0, y1),
+        )
+        paints = frozenset(shape.paint for shape in item.shapes)
+        places.append(ItemPlace(quad, paints, (x1 - x0) / (y1 - y0) if y1 > y0 else math.inf))
+    return places
+
+
 def outline_quads(
     pdf: pikepdf.Pdf,
 ) -> list[tuple[StreamRef, tuple[Point, Point, Point, Point]]]:
     """The place of each outline item, in the frame of the stream that draws it."""
-    quads = []
-    for ref, unit in drawing_streams(pdf):
-        for item in _items(read_stream(pdf, ref), unit):
-            x0, y0, x1, y1 = item.box
-            turn = _rotation(item.shapes[0].turn)
-            quads.append(
-                (
-                    ref,
-                    (
-                        apply_matrix(turn, x0, y0),
-                        apply_matrix(turn, x1, y0),
-                        apply_matrix(turn, x1, y1),
-                        apply_matrix(turn, x0, y1),
-                    ),
-                )
-            )
-    return quads
+    return [
+        (ref, place.quad)
+        for ref, unit in drawing_streams(pdf)
+        for place in item_places(read_stream(pdf, ref), unit)
+    ]
 
 
 class _Words:
@@ -522,10 +538,17 @@ def _resources(pdf: pikepdf.Pdf, ref: StreamRef) -> pikepdf.Object | None:
     return pdf.get_object(ref.objgen).get("/Resources")
 
 
-def _placed(
-    instructions: Sequence[Instruction], items: Sequence[_Item], font: _Font, words: _Words
+def place(number: int) -> Instruction:
+    """Stands for what ``placed_outside_groups`` draws there. Paints, as far as groups can tell."""
+    return _instruction(_PLACE, number)
+
+
+def placed_outside_groups(
+    instructions: Sequence[Instruction], draw: Callable[[int, Matrix], Sequence[Instruction]]
 ) -> list[Instruction]:
-    """Put each paragraph at its place, outside the groups open there, which then open again."""
+    """Draw at each ``place`` what ``draw`` gives for its number and the transform outside every
+    group, after closing the groups open there, which then open again. So a clip around a short run
+    of what it replaces cannot cut it."""
     output: list[Instruction] = []
     frames: list[list[Instruction]] = []
     ctm = _IDENTITY
@@ -533,11 +556,8 @@ def _placed(
     for instruction in instructions:
         operator = operator_name(instruction)
         if operator == _PLACE:
-            inverse = inverse_matrix(ctm)
-            if inverse is None:
-                raise CannotSubstitute("a paragraph's place has a transform that cannot be undone")
             output.extend(_instruction("Q") for _ in frames)
-            output.extend(_paragraph(items[int(instruction.operands[0])], font, words, inverse))
+            output.extend(draw(int(instruction.operands[0]), ctm))
             for frame in frames:
                 output.append(_instruction("q"))
                 output.extend(frame)
@@ -593,10 +613,19 @@ def text_from_outlines(
         marked: list[Instruction] = []
         for index, entry in enumerate(instructions):
             if index in last:
-                marked.append(_instruction(_PLACE, last[index]))
+                marked.append(place(last[index]))
             elif index not in gone:
                 marked.append(entry)
-        placed = _placed(without_empty_groups(marked), items, font, words)
+
+        def draw(
+            number: int, ctm: Matrix, items: list[_Item] = items, font: _Font = font
+        ) -> list[Instruction]:
+            inverse = inverse_matrix(ctm)
+            if inverse is None:
+                raise CannotSubstitute("a paragraph's place has a transform that cannot be undone")
+            return _paragraph(items[number], font, words, inverse)
+
+        placed = placed_outside_groups(without_empty_groups(marked), draw)
         write_stream(pdf, ref, without_empty_groups(placed))
         paragraphs[ref.label()] = len(items)
     return OutlineReport(sum(paragraphs.values()), paragraphs)

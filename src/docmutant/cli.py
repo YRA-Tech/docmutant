@@ -455,7 +455,7 @@ def main(argv: list[str] | None = None) -> int:
     anonymize.add_argument(
         "--keep-drawings",
         action="store_true",
-        help="keep outlines and codes drawn as paths: the file then has no privacy claim",
+        help="keep outlines, codes and graphics drawn as paths: the file then has no privacy claim",
     )
     anonymize.add_argument("--seed", type=int, default=0)
     anonymize.add_argument("--source-url")
