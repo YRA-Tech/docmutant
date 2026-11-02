@@ -144,18 +144,20 @@ def changed_regions(
     drawings: bool,
     tolerance: float = 0.0,
     text: TextPlaces | None = None,
+    blocks: Mapping[int, Sequence[tuple[float, float, float, float]]] | None = None,
 ) -> list[PageRegions]:
     """What a run may change on each page of ``pdf``, its source, under these settings.
 
-    ``tolerance`` is how far an edge of a line may move, in points, and ``text`` is where the
-    source shows text, if already found. Whatever a run keeps stays in the comparison, so a run
-    that keeps its images must not change a pixel of them.
+    ``tolerance`` is how far an edge of a line may move, in points, ``text`` is where the
+    source shows text, if already found, and ``blocks`` are boxes in default user space that the
+    run covers, as it covers formulas, which may get lighter like an image. Whatever a run keeps
+    stays in the comparison, so a run that keeps its images must not change a pixel of them.
     """
     streams: list[tuple[StreamRef, Quad]] = []
-    blocks: list[tuple[StreamRef, Quad]] = []
+    graphics_found: list[tuple[StreamRef, Quad]] = []
     if drawings:
         streams = [*outline_quads(pdf), *code_quads(pdf)]
-        blocks = graphic_quads(pdf, text or text_places(pdf, lines))
+        graphics_found = graphic_quads(pdf, text or text_places(pdf, lines))
     regions: list[PageRegions] = []
     for index, page in enumerate(pdf.pages):
         image_places, forms = placements(page)
@@ -168,7 +170,14 @@ def changed_regions(
         regions.append(
             PageRegions(
                 tuple(line_quad(line) for line in lines[index]),
-                (*pictures, *_on_page(blocks, index, forms)),
+                (
+                    *pictures,
+                    *_on_page(graphics_found, index, forms),
+                    *(
+                        ((x0, y0), (x1, y0), (x1, y1), (x0, y1))
+                        for x0, y0, x1, y1 in (blocks or {}).get(index, ())
+                    ),
+                ),
                 (*_annotation_quads(page), *_on_page(streams, index, forms)),
                 MARGIN + tolerance,
             )
@@ -176,7 +185,7 @@ def changed_regions(
     return regions
 
 
-class _Frame:
+class Frame:
     """From default user space to the pixels of a page as rendered, with its box and rotation."""
 
     def __init__(self, page: pdfium.PdfPage, size: tuple[int, int]) -> None:
@@ -217,7 +226,7 @@ def _grown(quad: Quad, margin: float) -> Quad:
     )
 
 
-def _mask(frame: _Frame, quads: Iterable[Quad], margin: float) -> Image.Image:
+def _mask(frame: Frame, quads: Iterable[Quad], margin: float) -> Image.Image:
     mask = Image.new("L", (frame.width, frame.height), 0)
     draw = ImageDraw.Draw(mask)
     for quad in quads:
@@ -234,7 +243,7 @@ def _ink(image: Image.Image) -> int:
 def _lost(
     before: Image.Image,
     after: Image.Image,
-    frame: _Frame,
+    frame: Frame,
     regions: PageRegions,
     images: Image.Image,
 ) -> int:
@@ -258,7 +267,7 @@ def _compare_page(
     after = output.render(scale=SCALE).to_pil().convert("L")
     if before.size != after.size:
         return PageDifference(same_size=False)
-    frame = _Frame(source, before.size)
+    frame = Frame(source, before.size)
     images = _mask(frame, regions.images, MARGIN)
     rest = _mask(frame, (*regions.lines, *regions.other), regions.margin)
     outside = ImageChops.invert(ImageChops.lighter(images, rest))

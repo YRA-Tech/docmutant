@@ -49,6 +49,7 @@ from docmutant.mutate import (
     read_stream,
     write_stream,
 )
+from docmutant.reading import MOSTLY, SHORTEST, longest_common
 from docmutant.substitute import CannotSubstitute, FontSource, ShownCode, embed_substitute
 from docmutant.tracker import (
     LINE_GAP,
@@ -235,6 +236,10 @@ class _Run:
     left: Counter[LeftReason]
     blocked: list[Word] = field(default_factory=list)
     """Words that have letters or digits and no fit."""
+
+    nearby: frozenset[str] = frozenset()
+    """The runs of letters or digits of the source's words on the line being planned: a new word
+    must not be mostly part of one, which a reader would see as what is left of it."""
 
 
 def _style(text: str) -> Style:
@@ -440,6 +445,26 @@ def _edits(
     return edits
 
 
+def remove_words(pdf: pikepdf.Pdf, words: Iterable[Word]) -> None:
+    """Take these words out of their streams, and leave the pen where each left it."""
+    edits = [
+        edit
+        for word in words
+        for edit in _edits(
+            word,
+            ((),) * len(_sites(word.glyphs)),
+            _along(word.glyphs[0].origin, word.glyphs[0].direction),
+            0.0,
+        )
+    ]
+    for ref in sorted(
+        {edit.stream for edit in edits},
+        key=lambda ref: (ref.kind, ref.page_index, ref.objgen or ()),
+    ):
+        here = [edit for edit in edits if edit.stream == ref]
+        write_stream(pdf, ref, _apply(read_stream(pdf, ref), here))
+
+
 def _shift_edits(word: Word, shift: float) -> list[_Edit]:
     """Move a word that keeps its codes, with what it holds between them, such as kerning."""
     edits = []
@@ -639,6 +664,15 @@ class WordFitter:
         over = _printed_over(lines)
         planned: dict[int, _LinePlan] = {}
         for number, line in enumerate(lines):
+            here = replace(
+                run,
+                nearby=frozenset(
+                    part
+                    for word in line.words
+                    for part in _runs(word.text)
+                    if len(part) >= SHORTEST
+                ),
+            )
             leader = None
             if number in over:
                 if policy.coverage != "all":
@@ -654,12 +688,11 @@ class WordFitter:
                     ),
                     None,
                 )
-            here = run
             if number in pinned:
                 # Refused once: its words keep their starts, and its box may not grow toward the
                 # lines around it, which can lie close or overlap, as the parts of a formula do.
-                tolerance = replace(run.settings.tolerance, out=0.0)
-                here = replace(run, settings=replace(run.settings, tolerance=tolerance))
+                tolerance = replace(here.settings.tolerance, out=0.0)
+                here = replace(here, settings=replace(here.settings, tolerance=tolerance))
             plan = self._plan_line(line, glyphs, order, here, leader, number in pinned)
             if plan.tiers:
                 planned[number] = plan
@@ -1091,7 +1124,11 @@ class WordFitter:
             if not strict:
                 return True
             lowered = candidate.text.lower()
-            return lowered not in self.source_words and differs(wanted, tuple(lowered))
+            return (
+                lowered not in self.source_words
+                and differs(wanted, tuple(lowered))
+                and not _left_of(lowered, run.nearby)
+            )
 
         near = NEAR * first.em
         lengths = sorted(table)
@@ -1214,6 +1251,14 @@ class WordFitter:
                 and "".join(output) in self.source_words
             ):
                 continue
+            # Each run between punctuation, such as each year of a range, is read on its own.
+            pieces = _runs("".join(code.text or "" for code in picks))
+            if any(
+                (len(piece) >= RESIDUAL_LENGTH and piece in self.source_words)
+                or _left_of(piece, run.nearby)
+                for piece in pieces
+            ):
+                continue
             parts = []
             place = 0
             for size in sizes:
@@ -1318,6 +1363,19 @@ def _failed_lines(result: GeometryResult, planned: set[int]) -> set[int]:
         if violation.kind == "line-gap" and violation.other is not None:
             named.add(violation.other)
     return (named & planned) or set(planned)
+
+
+def _runs(text: str) -> list[str]:
+    """The casefolded runs of letters or of digits of a text, as a reader splits it."""
+    return re.findall(r"[^\W\d_]+|\d+", text.casefold())
+
+
+def _left_of(new: str, nearby: Iterable[str]) -> bool:
+    """Whether most of a new run is part of one of these: what a reader takes for what is left of
+    a source word at the same place."""
+    return len(new) >= SHORTEST and any(
+        longest_common(new, old) >= MOSTLY * len(new) for old in nearby
+    )
 
 
 def _unnamed(result: GeometryResult) -> bool:

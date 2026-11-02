@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import io
 import math
+import re
 import zlib
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
@@ -33,6 +34,15 @@ from docmutant.coverage import (
     residual_text,
 )
 from docmutant.fit import CoverageStop, FitPolicy, WordFitter
+from docmutant.formulas import (
+    Formula,
+    draw_formulas,
+    find_formulas,
+    font_names,
+    glyphs_left,
+    remove_formulas,
+    without_formulas,
+)
 from docmutant.geometry import BoxSettings, BoxTolerance, check_boxes, within
 from docmutant.graphics import (
     graphics,
@@ -86,6 +96,9 @@ class Profile:
     reads_render: bool = False
     """Whether source words that a person could read in the rendered output stop the run."""
 
+    replace_formulas: bool = False
+    """Whether a displayed formula becomes a patterned block: see ``formulas``."""
+
 
 PRIVACY_TOLERANCE = 1.0
 """Points that each edge of a line may move under ``privacy`` unless the user says otherwise. Less
@@ -102,6 +115,7 @@ PROFILES = {
         requires_coverage=True,
         replace_drawings=True,
         reads_render=True,
+        replace_formulas=True,
     ),
     "training": Profile(
         "training",
@@ -127,12 +141,14 @@ def resolve_profile(
     word_starts: str | None = None,
     keep_images: bool = False,
     keep_drawings: bool = False,
+    keep_formulas: bool = False,
 ) -> Profile:
     """A profile with the settings that the user changed, if the profile allows them.
 
     ``privacy`` holds its coverage and word starts: they are what its claim rests on. It can
-    keep images or drawings, which no oracle reads, but the file then has no claim.
+    keep images, drawings or formulas, which no oracle reads, but the file then has no claim.
     """
+    keeps = keep_images or keep_drawings or keep_formulas
     profile = PROFILES[name]
     if name == "privacy" and (coverage not in (None, "all") or word_starts not in (None, "moved")):
         raise ProfileError("the privacy profile needs coverage all and word starts moved")
@@ -148,8 +164,9 @@ def resolve_profile(
         policy=policy,
         replace_images=profile.replace_images and not keep_images,
         replace_drawings=profile.replace_drawings and not keep_drawings,
-        reads_render=profile.reads_render and not (keep_images or keep_drawings),
-        claims=() if keep_images or keep_drawings else profile.claims,
+        replace_formulas=profile.replace_formulas and not keep_formulas,
+        reads_render=profile.reads_render and not keeps,
+        claims=() if keeps else profile.claims,
         requires_coverage=profile.requires_coverage or policy.coverage == "all",
     )
 
@@ -556,6 +573,36 @@ def _check_output(
     return checks, problems, output, metrics
 
 
+def _written(
+    data: bytes, known: Iterable[str]
+) -> list[list[tuple[str, tuple[float, float, float, float]]]]:
+    """The new words of each page of the saved file, in pixels of the reader's render. A word with
+    a run that is a word of the source is not new, and is left out."""
+    source = {word.casefold() for word in known}
+    document = pypdfium2.PdfDocument(data)
+    pdf = pikepdf.open(io.BytesIO(data))
+    pages = []
+    try:
+        for index, page in enumerate(pdf.pages):
+            rendered = document[index]
+            width, height = rendered.get_size()
+            frame = difference.Frame(
+                rendered, (round(width * reading.SCALE), round(height * reading.SCALE))
+            )
+            words = []
+            for line in group_lines(trace_page(page)):
+                for word in line.words:
+                    runs = re.findall(r"[^\W\d_]+|\d+", word.text.casefold())
+                    if not runs or any(run in source for run in runs):
+                        continue
+                    xs, ys = zip(*frame.quad(word.box.corners), strict=True)
+                    words.append(("".join(runs), (min(xs), min(ys), max(xs), max(ys))))
+            pages.append(words)
+    finally:
+        document.close()
+    return pages
+
+
 def _check_render(
     source_read: Sequence[Sequence[reading.ReadWord]],
     data: bytes,
@@ -569,7 +616,7 @@ def _check_render(
         output_read = reading.read_pages(data, reader)
     except reading.CannotRead as error:
         return Check("readable-text", reader.name, False), [str(error)]
-    found = reading.readable(source_read, output_read, known)
+    found = reading.readable(source_read, output_read, known, _written(data, known))
     source_words = sum(len(reading.tokens(page)) for page in source_read)
     output_words = sum(len(reading.tokens(page)) for page in output_read)
     problems = [
@@ -650,6 +697,27 @@ def anonymize(
     if problems:
         return Result(None, tuple(problems), pages=len(original.pages))
 
+    # A formula's glyphs go before any word is fitted, and its words are not to come back.
+    formulas: dict[int, list[Formula]] = {}
+    kept_lines: dict[int, list[Line]] = source_lines
+    if profile.replace_formulas:
+        names = font_names(original)
+        formulas = {index: find_formulas(lines, names) for index, lines in source_lines.items()}
+        remove_formulas(pdf, formulas)
+        kept_lines = {
+            index: without_formulas(trace_page(original.pages[index]), formulas[index])
+            if formulas[index]
+            else lines
+            for index, lines in source_lines.items()
+        }
+    avoid = avoid | {
+        run.casefold()
+        for found in formulas.values()
+        for formula in found
+        for word in formula.words
+        for run in re.findall(r"[^\W\d_]+|\d+", word.text)
+    }
+
     source_read: list[list[reading.ReadWord]] = []
     if profile.reads_render:
         try:
@@ -727,6 +795,18 @@ def anonymize(
                 "params": {"style": "flat, light", "images": images, "made_solid": len(solid)},
             }
         )
+    if profile.replace_formulas:
+        draw_formulas(pdf, formulas)
+        mutations.append(
+            {
+                "operator": "replace-formulas",
+                "params": {
+                    "displayed": sum(1 for found in formulas.values() for f in found if f.lines),
+                    "inline": sum(1 for found in formulas.values() for f in found if not f.lines),
+                    "pattern": "formula",
+                },
+            }
+        )
     dropped = _drop_unused_form_fonts(pdf) if profile.substitute_fonts else 0
     layers = clean_layers(pdf, seed, avoid | fitter.source_words)
     mutations.append(
@@ -738,8 +818,30 @@ def anonymize(
 
     data = _save(pdf)
     checks, problems, output, metrics = _check_output(
-        profile, original, source, data, source_lines, avoid | fitter.source_words
+        profile, original, source, data, kept_lines, avoid | fitter.source_words
     )
+    if profile.replace_formulas:
+        left_in = {
+            index: glyphs_left(group_lines(trace_page(output.pages[index])), found)
+            for index, found in formulas.items()
+            if found
+        }
+        checks.append(
+            Check(
+                "formulas",
+                "docmutant tracker",
+                not any(left_in.values()),
+                {
+                    "formulas": sum(len(found) for found in formulas.values()),
+                    "glyphs_left": sum(left_in.values()),
+                },
+            )
+        )
+        problems.extend(
+            f"page {index + 1}: {count} glyphs left in a formula's block"
+            for index, count in sorted(left_in.items())
+            if count
+        )
     drawings = {index: curved_fills(page) for index, page in enumerate(output.pages)}
     if profile.replace_drawings:
         left = outline_items(output)
@@ -797,6 +899,7 @@ def anonymize(
         drawings=profile.replace_drawings,
         tolerance=profile.settings.tolerance.out,
         text=text,
+        blocks={index: [formula.box for formula in found] for index, found in formulas.items()},
     )
     check, damage = _check_difference(source, data, regions)
     checks.append(check)
@@ -834,6 +937,9 @@ def anonymize(
         replaced.append(f"{codes} machine-readable codes: flat blocks")
     if blocks:
         replaced.append(f"{blocks} graphics: flat blocks")
+    formula_count = sum(len(found) for found in formulas.values())
+    if formula_count:
+        replaced.append(f"{formula_count} displayed formulas: blocks with the formula pattern")
     if profile.replace_images and images:
         replaced.append(f"{images} images: flat")
     if substituted:

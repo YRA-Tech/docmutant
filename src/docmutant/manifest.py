@@ -45,6 +45,7 @@ PRIVACY_ORACLES = frozenset(
         "machine-codes",
         "readable-text",
         "render-difference",
+        "formulas",
     }
 )
 PRIVACY_STATEMENT = "privacy-"

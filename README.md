@@ -38,8 +38,9 @@ the labels stay exact.
 Pre-alpha. Built so far: the manifest model with its policy checks, a
 validator, a first reduce/sanitize mode for rendering bugs with crash, hang and
 error oracles that run docling-parse, and an anonymize mode that changes every
-word and every hidden layer of a document, turns text drawn as outlines into new
-text and logos, icons and machine-readable codes into flat blocks under its privacy profile, and
+word and every hidden layer of a document. Under its privacy profile it turns text
+drawn as outlines into new text, logos, icons and machine-readable codes into flat
+blocks, and formulas into blocks with a pattern of their own. It
 writes nothing unless the saved file passes its checks, which include reading the
 rendered pages and comparing them with the source's. The privacy profile needs [Tesseract](https://github.com/tesseract-ocr/tesseract)
 on the path. See [docs/DESIGN.md](docs/DESIGN.md) for the design and

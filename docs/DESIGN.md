@@ -115,12 +115,14 @@ Replace the content of a whole document, in every layer (see 5.6), under the
 `training` or `privacy` profile (see 4). Steps, in order:
 
 1. Refuse a page that cannot be traced.
-2. Fit new words on every page (see 5.3).
-3. Under `privacy`: give every font a substitute, turn machine-readable codes and
+2. Under `privacy`, take out displayed formulas and words of math (see 5.5).
+3. Fit new words on every page (see 5.3).
+4. Under `privacy`: give every font a substitute, turn machine-readable codes and
    graphics such as logos into flat blocks and text drawn as outlines into paragraphs
-   of new text (see 5.5), and replace every image.
-4. Clean the hidden layers (see 5.6).
-5. Save, open the saved bytes again, and run every oracle on them (see 5.8).
+   of new text (see 5.5), replace every image, and cover each formula with a block in
+   the formula pattern.
+5. Clean the hidden layers (see 5.6).
+6. Save, open the saved bytes again, and run every oracle on them (see 5.8).
 
 If an oracle that the profile requires fails, there is no output file: a reason
 for each failure goes to the user, and only there, since it can quote the source.
@@ -134,8 +136,8 @@ selection (see 5.7). Real words come from a bundled vocabulary of common
 English words, or from the file that `--vocabulary` names; an empty file leaves
 invented words only. The manifest names the vocabulary by its size and hash. `--keep-images` and `--keep-drawings` keep what would stop the
 claim, and the file then has no `privacy` claim and no reading of its render.
-`--keep-drawings` keeps outlines, codes and graphics exact, which is what `training`
-always does.
+`--keep-drawings` keeps outlines, codes and graphics exact, and `--keep-formulas` keeps
+formulas as text, which is what `training` always does.
 
 A `privacy` run needs Tesseract, to read the rendered pages (see 5.5). Without it the
 run stops, because a check that did not look must not pass. The output's bytes depend
@@ -582,9 +584,8 @@ Planned, in order:
   Since then, the narrow words take any letter, and the standard fonts have widths. On
   12 sample files as whole documents under `privacy`, 10 pass at `exact` and 11 at `±1`,
   up from 8 and 9; the receipt with the lone `1` passes at `±1` only. The one that
-  stops is a paper whose displayed formulas draw a fraction's parts as separate slanted
-  glyphs: 8 words on 3 pages stay, at `±1`. Its math font holds a few letters only, and
-  one formula's lines join whatever changes in it.
+  stopped is a paper whose displayed formulas draw a fraction's parts as separate slanted
+  glyphs, in a math font of a few letters: its formulas now become blocks (see 5.5).
 - **Glyph availability** (partial): fitted replacement uses only codes that the
   document shows in that font, which needs no font parsing but leaves out glyphs
   a full font could draw. Planned: subset fonts lack glyphs that the document
@@ -738,16 +739,55 @@ letters. 20 images in 2 files become solid. The same files pass and stop as befo
 `training` and `--keep-images` too. A logo of one colour stays, and so does an icon of one
 colour, which can still become a letter. A block keeps a graphic's size and place.
 
+**Formulas** (`formulas.py`). A displayed formula says which paper it comes from as surely
+as its title, and swapping its letters keeps its shape: a fraction over a sum, its
+subscripts and brackets. Nor do its letters swap well: a math font holds the few letters
+that the formula uses, and the parts of a fraction are lines of their own, which join when
+anything in them moves. So under `privacy`, before any word is fitted, the glyphs of each
+formula go, with the pen left where each word left it, and its words join those that no
+new word may be. A light block covers where it was, drawn last over the page, so that no
+graphic takes it into a plain block of its own.
+
+The block has the formula pattern: plus signs of grey 0.78, 3.2 pt across, on a grid of
+12 pt staggered by half a step, over grey 0.9, anchored at the page's origin. It labels the
+block as a formula without any text, for a tool or a reviewer that knows it; the pattern is
+in this public repository, so it is a convention, not a secret. Other kinds of block may
+take patterns of their own.
+
+A formula line is one whose glyphs are 40% math or more, at least two of them: math letters,
+Greek letters, operators and arrows, or glyphs of a math or symbol font. Lines whose bands
+(0.2 em below the baseline to 0.7 em above) overlap a formula line's, or come within 1 em of
+it, go with it: the parts of a fraction, a large bracket, an equation's number. In a line of
+text, a word whose glyphs are half math or more, a letter of math among them, is a formula of
+its own, with a small block: an arrow used as a bullet, or a sign alone, is not.
+A block reaches 0.3 em below and 0.9 em above, and stops short of the band of any other line.
+A formula in a form stays, since the form can be drawn elsewhere too.
+
+The geometry and coverage oracles compare the source without the formulas' glyphs, grouped
+again as the output is, with the output. The oracle `formulas` looks for any glyph that
+starts inside a block, and the render difference lets a block get lighter than what it
+covers, but not darker. `--keep-formulas` keeps them as text, and gives up the claim.
+
+On the sample, one paper of 42 pages has 31 displayed formulas and 7 words of math in its
+text. With them as blocks, it passes every check: its other 10,746 words change, 89% of
+them to real words, and the reader finds no source word.
+
 **Reading the render** (`reading.py`). Every other oracle reads the file's operators and
 objects, so what they cannot see they pass, and three times a page has passed them with
 source text in plain view. The oracle `readable-text` looks at the picture instead: it
 reads the rendered pages of source and output through Tesseract, at 216 dpi, and stops
 if a word of 4 letters or more:
 
-- is a word of the source, anywhere in the document, from either the reader or the file;
+- is a word of the source, anywhere in the document, from either the reader or the file,
+  unless it is part of a new word that the run wrote there: the reader splits a long word
+  now and then, and a new word can hold a short one, as `bookshops` holds `book`. A word
+  that the run left unchanged is a source word, so it is never new;
 - or is at least 80% part of a word that the reader saw at the same place in the source.
   This is what is left of a word when only some letters changed. A fragment elsewhere
-  is chance, and common in new words, but layout holds, so here it is not.
+  is chance, and common in new words, but layout holds, so here it is not. The fitter
+  keeps to the same rule: no new word or run of a swap is mostly part of a source word
+  on its line, and no run between punctuation is a source word, as a year in a range
+  could be.
 
 A reader that sees nothing where the pages show at least 20 words also stops the run, so
 that a broken one, or a blank output, cannot pass. Words stay out of the manifest, as
@@ -840,6 +880,7 @@ region and every text region that stayed, with the detector's confidence.
 | image geometry: each page draws images of the same sizes and depths. The filter can change, under `privacy`: a flat image is Flate | built |
 | drawn text: no outline item or graphic is left, and no page keeps so many curved shapes that someone should look (see 5.5) | built |
 | machine codes: no QR code, Data Matrix or barcode drawn as paths is left (see 5.5) | built |
+| formulas: no glyph starts inside a formula's block (see 5.5) | built |
 | readable text: OCR of the render reads no source word in the output, and has read something (see 5.5) | built |
 | render difference: pypdfium2 renders source and saved file, and what a run does not change must look the same (see below), with per-page `compared`, `changed_pixels_ratio`, `mean_abs_error`, `darkened` and `lines_lost` | built |
 | render difference between two engines | planned |
@@ -1004,9 +1045,10 @@ word list used to filter the vocabulary (LDNOOBW, CC BY 4.0) is not shipped.
 - Whether to read languages other than English. Tesseract runs with its default model,
   which reads other Latin scripts less well and other scripts not at all.
 - What else could count as a code, such as a PDF417 stack of unequal rows.
-- How to change displayed formulas, whose parts are separate glyphs set close together and
-  whose math fonts hold few letters. A swap that keeps each glyph's start fits most of them;
-  on the sample, 8 words on 3 pages of one paper still do not change.
+- What counts as a formula. The limits come from one paper: a line half math, a word half
+  math, bands of 0.2 to 0.7 em, 1 em between parts. A table of Greek-lettered values would
+  become blocks too, and a formula set in an ordinary italic font, as many are, is not found
+  and goes to the fitter like any text.
 - Whether `±1` is the right tolerance for `privacy`. It lets a lone digit change, and no
   sample file needed more, but a line box that moves by a point is less exact than before.
 - What counts as a graphic. Its limits come from 12 files: 12 to 144 pt, two colours, 1.25 for

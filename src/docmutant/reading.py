@@ -5,10 +5,11 @@ A letter left as a path has no text operator, and it looks to them like any othe
 oracle looks at the picture of the page instead, through OCR, and so does not share the blind
 spots of the code that changed the page.
 
-A word of the output is a match if it is a word of the source, anywhere in the document. Or if most
-of it is part of a source word that was read at the same place: what is left of a word in which only
-some letters changed. Chance fragments are common in new words, but layout holds, so a fragment in
-the same place is not chance.
+A word of the output is a match if it is a word of the source, anywhere in the document, unless it
+is part of a new word that the run wrote there: a reader can split a long word, and new words can
+hold short ones. Or if most of it is part of a source word that was read at the same place: what is
+left of a word in which only some letters changed. Chance fragments are common in new words, but
+layout holds, so a fragment in the same place is not chance.
 
 A match stops the run. No match is evidence, not proof: OCR misses small and stylized text, and
 it cannot tell a logo from a drawing.
@@ -133,7 +134,7 @@ def _same_place(first: Sequence[int], second: Sequence[int]) -> bool:
     )
 
 
-def _longest_common(first: str, second: str) -> int:
+def longest_common(first: str, second: str) -> int:
     """The length of the longest run of ``first`` that is in ``second``."""
     best = 0
     for start in range(len(first)):
@@ -148,22 +149,29 @@ def readable(
     source: Sequence[Sequence[ReadWord]],
     output: Sequence[Sequence[ReadWord]],
     known: Iterable[str] = (),
+    written: Sequence[Sequence[tuple[str, tuple[float, float, float, float]]]] = (),
 ) -> dict[int, tuple[str, ...]]:
     """What can still be read of the source, on each page of the output, if anything.
 
     ``known`` holds source words that the file gave, which the reader need not have seen.
+    ``written`` holds, for each page, the new words that the run wrote, casefolded, with their
+    boxes in pixels of the rendered page: none of them may be a word of the source.
     """
     forbidden = {word.casefold() for word in known if len(word) >= SHORTEST}
     forbidden.update(token for page in source for token, _ in tokens(page))
     found: dict[int, tuple[str, ...]] = {}
     for index, page in enumerate(output):
         here = tokens(source[index]) if index < len(source) else []
+        new = written[index] if index < len(written) else ()
         hits = {
             token
             for token, box in tokens(page)
-            if token in forbidden
+            if (
+                token in forbidden
+                and not any(token in text and _same_place(box, place) for text, place in new)
+            )
             or any(
-                _same_place(box, place) and _longest_common(token, word) >= MOSTLY * len(token)
+                _same_place(box, place) and longest_common(token, word) >= MOSTLY * len(token)
                 for word, place in here
             )
         }

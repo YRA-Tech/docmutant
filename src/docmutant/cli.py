@@ -285,6 +285,7 @@ def _cmd_anonymize(args: argparse.Namespace) -> int:
             word_starts=args.word_starts,
             keep_images=args.keep_images,
             keep_drawings=args.keep_drawings,
+            keep_formulas=args.keep_formulas,
         )
     except ProfileError as error:
         print(f"error: {error}", file=sys.stderr)
@@ -459,6 +460,11 @@ def main(argv: list[str] | None = None) -> int:
         "--keep-drawings",
         action="store_true",
         help="keep outlines, codes and graphics drawn as paths: the file then has no privacy claim",
+    )
+    anonymize.add_argument(
+        "--keep-formulas",
+        action="store_true",
+        help="keep displayed formulas as text: the file then has no privacy claim",
     )
     anonymize.add_argument("--seed", type=int, default=0)
     anonymize.add_argument("--source-url")

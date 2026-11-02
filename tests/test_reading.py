@@ -49,6 +49,20 @@ def test_a_word_that_the_file_gave_counts_though_the_reader_missed_it():
     assert readable([[]], [[_at("Lamport")]], ["lamport"]) == {0: ("lamport",)}
 
 
+def test_part_of_a_new_word_at_its_place_is_no_match_but_a_source_fragment_is():
+    # A reader splits the new word bookshops; book is a word elsewhere in the source.
+    source = [[_at("Brookside", 0, 0)], [_at("book", 300, 300)]]
+    output = [[_at("Book", 0, 0, 40), _at("shops", 45, 0)], []]
+    written = [[("bookshops", (0, 0, 100, 20))], []]
+    assert readable(source, output, written=written) == {}
+    assert readable(source, output) == {0: ("book",)}
+    # What is left of the source word there still counts, new word or not.
+    left = [[_at("Brookside", 0, 0)]]
+    assert readable(left, [[_at("rookside", 0, 0)]], written=[[("rookside", (0, 0, 60, 20))]]) == {
+        0: ("rookside",)
+    }
+
+
 def test_short_words_are_not_read_as_matches():
     assert readable([[_at("the")]], [[_at("the")]], ["the"]) == {}
 

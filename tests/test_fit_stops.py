@@ -165,3 +165,32 @@ def test_privacy_holds_each_edge_of_a_line_within_a_point_unless_told_otherwise(
     assert resolve_profile("privacy").settings.tolerance == within(1)
     assert resolve_profile("privacy", tolerance=EXACT).settings.tolerance == EXACT
     assert resolve_profile("training").settings.tolerance == EXACT
+
+
+# Digits only, and a hyphen: each digit has one other to stand for it.
+DIGITS = {32: 250, 45: 333, 48: 500, 50: 500}
+DIGIT_GLYPHS = b"BT /F1 10 Tf 72 100 Td (0   2   -) Tj ET "
+
+
+@pytest.mark.parametrize("avoid", [(), ("022",)])
+def test_each_run_of_a_swapped_word_is_checked_against_the_source(avoid):
+    pdf = _page(DIGIT_GLYPHS + b"BT /F1 10 Tf 72 700 Td (200-020) Tj ET", DIGITS)
+    settings = BoxSettings("line", EXACT, tracking_limit=0.02)
+    fitter = WordFitter(pdf, [], None, avoid)
+    if not avoid:
+        assert fitter.fit_page(0, settings, 0, ALL).coverage.passed
+        assert _lines(pdf)[1].text == "022-202"
+        return
+    # 022-202 is the only swap, and 022 is a source word on its own.
+    with pytest.raises(CoverageStop):
+        fitter.fit_page(0, settings, 0, ALL)
+
+
+def test_a_new_word_is_not_mostly_part_of_a_source_word_on_its_line():
+    # The only real word is most of the source word after it.
+    pdf = _page(TIGHT_GLYPHS + b"BT /F1 10 Tf 72 700 Td (cdab abcda) Tj ET", TIGHT)
+    report = WordFitter(pdf, ["bcda"]).fit_page(
+        0, BoxSettings("line", within(5), tracking_limit=0.02), 0, ALL
+    )
+    assert report.coverage.passed
+    assert "bcda" not in [word.text for word in _lines(pdf)[1].words]
