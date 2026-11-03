@@ -35,16 +35,41 @@ the labels stay exact.
 
 ## Status
 
-Pre-alpha. Built so far: the manifest model with its policy checks, a
-validator, a first reduce/sanitize mode for rendering bugs with crash, hang and
-error oracles that run docling-parse, and an anonymize mode that changes every
-word and every hidden layer of a document. Under its privacy profile it turns text
-drawn as outlines into new text, logos, icons and machine-readable codes into flat
-blocks, and formulas into blocks with a pattern of their own. It
-writes nothing unless the saved file passes its checks, which include reading the
-rendered pages and comparing them with the source's. The privacy profile needs [Tesseract](https://github.com/tesseract-ocr/tesseract)
-on the path. See [docs/DESIGN.md](docs/DESIGN.md) for the design and
-the roadmap.
+Pre-alpha. Built so far:
+
+- the manifest model, with its policy checks and a validator;
+- a first reduce/sanitize mode for rendering bugs, with crash, hang and error
+  oracles that run docling-parse;
+- an anonymize mode that changes every word and every hidden layer of a document.
+
+Anonymize fits a new word into each word's box. It uses real words from a bundled
+vocabulary where one fits, and otherwise invented words or letter swaps. Every line
+keeps its box to within a set tolerance. Under the `privacy` profile it also:
+
+- turns text drawn as outlines into new text;
+- makes logos, icons and machine-readable codes flat blocks;
+- covers images with flat colour;
+- replaces displayed formulas, and words of math it cannot change, with blocks
+  that have a pattern of their own;
+- replaces each font program with a freely licensed substitute.
+
+It writes nothing unless the saved file passes its checks. Those include word
+geometry and coverage, what pdfium still reads, what Tesseract reads in the
+rendered pages, and the pixel difference from the source outside the parts the run
+changed. The privacy profile needs [Tesseract](https://github.com/tesseract-ocr/tesseract)
+on the path.
+
+Known limits, from runs on real documents:
+
+- A glyph whose font gives no text draws nothing in the substitute font, and the
+  checks then stop the run. This covers composite fonts without `/ToUnicode`
+  and glyph names that say nothing, such as MathType's `H20850`. Text is read from
+  `/ToUnicode`, from the encoding, and from the encoding built into a Type1 or
+  CFF font program, with TeX's glyph names.
+- Each check stops a run rather than let a file through. A file can therefore
+  stop on a page that would have passed with a little more room.
+
+See [docs/DESIGN.md](docs/DESIGN.md) for the design and the roadmap.
 
 ```console
 $ docmutant reduce manual.pdf --page 7 --out p7.pdf --oracle crash \
@@ -52,7 +77,7 @@ $ docmutant reduce manual.pdf --page 7 --out p7.pdf --oracle crash \
     --silent-python /path/to/fixed/.venv/bin/python --scale 3.0
 $ docmutant attest p7.pdf.docmutant.json --reviewer "A. Reviewer"
 $ docmutant validate --check-file p7.pdf.docmutant.json
-$ docmutant anonymize report.pdf --out clean.pdf --profile privacy --tolerance 1
+$ docmutant anonymize report.pdf --out clean.pdf --profile privacy
 $ docmutant schema                     # print the manifest JSON Schema
 ```
 
