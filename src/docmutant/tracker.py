@@ -35,8 +35,10 @@ from docmutant.mutate import (
     CMAP_TOKEN,
     SIMPLE_FONT_SUBTYPES,
     StreamRef,
+    builtin_names,
     cid_widths,
     encoding_text,
+    names_base,
     simple_spaces,
     to_unicode,
 )
@@ -383,9 +385,15 @@ def _font(name: str, font: pikepdf.Object) -> _Font:
             for code, char in encoding_text(encoding).items()
             if char in standard
         }
+    # TeX's fonts often name no base: what a code draws is in the embedded program.
+    builtin = (
+        builtin_names(font)
+        if subtype in ("/Type1", "/MMType1") and not names_base(encoding)
+        else {}
+    )
     text = {
         **simple_spaces(encoding),
-        **encoding_text(encoding),
+        **encoding_text(encoding, builtin),
         **to_unicode(font.get("/ToUnicode")),
     }
     if subtype != "/Type3":

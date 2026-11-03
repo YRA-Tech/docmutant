@@ -714,6 +714,91 @@ def test_to_unicode_comes_before_the_encoding():
     assert _words(pdf) == [[3]]
 
 
+TYPE1_CLEAR = (
+    b"%!PS-AdobeFont-1.0: Test 001\n/FontName /Test def\n"
+    b"/Encoding 256 array\n0 1 255 {1 index exch /.notdef put} for\n"
+    b"dup 65 /alpha put\ndup 66/beta put\nreadonly def\ncurrentdict end\ncurrentfile eexec\n"
+)
+
+
+def _with_program(pdf: pikepdf.Pdf, key: str, data: bytes, **stream) -> pikepdf.Object:
+    font = pdf.pages[0].Resources.Font.F1
+    font.FontDescriptor = pdf.make_indirect(
+        pikepdf.Dictionary(
+            Type=pikepdf.Name.FontDescriptor,
+            FontName=pikepdf.Name("/Test"),
+            **{key[1:]: pdf.make_stream(data, **stream)},
+        )
+    )
+    return font
+
+
+def _cff(names: dict[int, str]) -> bytes:
+    from fontTools.fontBuilder import FontBuilder
+    from fontTools.pens.t2CharStringPen import T2CharStringPen
+
+    glyphs = [".notdef", *names.values()]
+    builder = FontBuilder(1000, isTTF=False)
+    builder.setupGlyphOrder(glyphs)
+    builder.setupCharacterMap({})
+    strings = {name: T2CharStringPen(500, None).getCharString() for name in glyphs}
+    builder.setupCFF("Test", {}, strings, {})
+    fonts = builder.font["CFF "].cff
+    encoding = [".notdef"] * 256
+    for code, name in names.items():
+        encoding[code] = name
+    fonts[fonts.fontNames[0]].Encoding = encoding
+    buffer = io.BytesIO()
+    fonts.compile(buffer, builder.font)
+    return buffer.getvalue()
+
+
+def _texts(pdf: pikepdf.Pdf) -> list[str | None]:
+    return [glyph.text for glyph in trace_page(pdf.pages[0])]
+
+
+def test_a_type1_font_without_an_encoding_uses_the_one_in_its_program():
+    # TeX's math fonts: neither /Encoding nor /ToUnicode, only the program says what codes draw.
+    pdf = _pdf(b"BT /F1 10 Tf (AB) Tj ET")
+    assert _texts(pdf) == [None, None]
+    _with_program(pdf, "/FontFile", TYPE1_CLEAR + b"\x00" * 16, Length1=len(TYPE1_CLEAR))
+    assert _texts(pdf) == ["α", "β"]
+
+
+def test_differences_go_over_the_program_encoding_and_a_named_base_replaces_it():
+    pdf = _pdf(b"BT /F1 10 Tf (AB) Tj ET")
+    font = _with_program(pdf, "/FontFile", TYPE1_CLEAR, Length1=len(TYPE1_CLEAR))
+    font.Encoding = pikepdf.Dictionary(Differences=[66, pikepdf.Name("/gamma")])
+    assert _texts(pdf) == ["α", "γ"]
+    font.Encoding.BaseEncoding = pikepdf.Name.WinAnsiEncoding
+    assert _texts(pdf) == ["A", "γ"]
+
+
+def test_a_compact_font_program_gives_its_encoding_too():
+    pdf = _pdf(b"BT /F1 10 Tf (AB) Tj ET")
+    _with_program(pdf, "/FontFile3", _cff({65: "alpha", 66: "beta"}), Subtype=pikepdf.Name.Type1C)
+    assert _texts(pdf) == ["α", "β"]
+
+
+def test_tex_names_and_their_sizes_give_text():
+    pdf = _pdf(b"BT /F1 10 Tf (AB C) Tj ET", {65: 500, 66: 500, 67: 500, 32: 250})
+    pdf.pages[0].Resources.Font.F1.Encoding = pikepdf.Dictionary(
+        Differences=[
+            65,
+            pikepdf.Name("/prime"),
+            pikepdf.Name("/parenleftBig"),
+            pikepdf.Name("/g12"),
+        ]
+    )
+    assert _texts(pdf) == ["′", "(", " ", None]
+
+
+def test_a_program_that_cannot_be_read_says_nothing():
+    pdf = _pdf(b"BT /F1 10 Tf (AB) Tj ET")
+    _with_program(pdf, "/FontFile3", b"\x01\x00\x04\x04damaged", Subtype=pikepdf.Name.Type1C)
+    assert _texts(pdf) == [None, None]
+
+
 def test_words_and_lines_match_pdfium():
     content = (
         b"BT /F1 12 Tf 72 700 Td (Hello world) Tj 0 -14 Td [(Hello) -400 (world)] TJ "

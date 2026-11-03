@@ -499,9 +499,12 @@ jumps back more than 1 em or forward more than 2 em, or changes between visible
 and invisible. Inside a line, a space or a gap of more than 0.15 em ends a word.
 Text comes from `/ToUnicode` (`bfchar` and `bfrange`) and, in a simple font, from
 the encoding: a named base encoding and the glyph names of `/Differences`, read
-through the Adobe Glyph List. A font with no named base has a built-in encoding,
-which only its program knows, so only its `/Differences` count. A name that says
-nothing, such as `g12`, gives no text. Each box is a rectangle in the frame of its line, as 4.4
+through the Adobe Glyph List, or else TeX's names for the glyphs of its math fonts, with
+sizes such as `parenleftBig` read as their base. A Type1 font with no named base uses the
+encoding built into its program: the `dup 65 /A put` lines of a Type1 program's clear text,
+or a compact (CFF) program's encoding. TeX's fonts often rely on it, with neither
+`/Encoding` nor `/ToUnicode`, and a glyph without text draws nothing in a substitute font. A
+name that says nothing, such as `g12`, gives no text. Each box is a rectangle in the frame of its line, as 4.4
 requires, and a line box is the union of its word boxes.
 
 A standard font may leave out `/Widths`, since every reader knows them. For Helvetica,

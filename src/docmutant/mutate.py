@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import io
 import math
 import random
 import re
 import zlib
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 
 import pikepdf
-from fontTools.agl import toUnicode as glyph_name_text
+from fontTools.agl import toUnicode as agl_text
+from fontTools.cffLib import CFFFontSet
 from fontTools.encodings.StandardEncoding import StandardEncoding
 from PIL import Image
 
@@ -526,21 +528,159 @@ def simple_spaces(encoding: pikepdf.Object | None) -> dict[int, str]:
     return spaces
 
 
-def encoding_text(encoding: pikepdf.Object | None) -> dict[int, str]:
+TEX_NAMES = {
+    "angbracketleft": "⟨",
+    "angbracketright": "⟩",
+    "asteriskmath": "∗",
+    "bardbl": "‖",
+    "ceilingleft": "⌈",
+    "ceilingright": "⌉",
+    "circlecopyrt": "◯",
+    "circledot": "⊙",
+    "dispiiint": "∭",
+    "epsilon1": "ϵ",
+    "floorleft": "⌊",
+    "floorright": "⌋",
+    "follows": "≻",
+    "greaterorequalslant": "⩾",
+    "greaterorsimilar": "≳",
+    "greatermuch": "≫",
+    "hat": "ˆ",
+    "lessorequalslant": "⩽",
+    "lessorsimilar": "≲",
+    "lessmuch": "≪",
+    "llbracket": "⟦",
+    "lscript": "ℓ",
+    "mapsto": "↦",
+    "nabla": "∇",
+    "negationslash": "̸",
+    "precedes": "≺",
+    "prime": "′",
+    "reflexsubset": "⊆",
+    "reflexsuperset": "⊇",
+    "rrbracket": "⟧",
+    "sharp": "♯",
+    "similarequal": "≃",
+    "square": "□",
+    "squaresolid": "■",
+    "star": "⋆",
+    "triangle": "△",
+    "turnstileleft": "⊢",
+    "turnstileright": "⊣",
+    "vec": "⃗",
+    "vector": "⃗",
+    "vextenddouble": "‖",
+    "vextendsingle": "∣",
+}
+"""TeX's names for glyphs of its math fonts that the Adobe Glyph List does not know."""
+
+_TEX_SIZE = re.compile(
+    r"(?<=[A-Za-z]{2})(?:big|Big|bigg|Bigg|display|text|wide|wider|widest|exA|ex|1)$"
+)
+"""Sizes and variants that TeX's math fonts add to a name: ``parenleftBig`` is a parenthesis."""
+
+
+def glyph_name_text(name: str) -> str:
+    """The text of a glyph name: the Adobe Glyph List's, else TeX's, of the name or its base."""
+    name = name.split(".", 1)[0]
+    for candidate in (name, _TEX_SIZE.sub("", name)):
+        text = agl_text(candidate) or TEX_NAMES.get(candidate, "")
+        if text:
+            return text
+    return ""
+
+
+def names_base(encoding: pikepdf.Object | None) -> bool:
+    """Whether a simple font's encoding names its base, so that the program's own is not used."""
+    return isinstance(encoding, pikepdf.Name) or (
+        isinstance(encoding, pikepdf.Dictionary) and "/BaseEncoding" in encoding
+    )
+
+
+_TYPE1_NAME = re.compile(rb"dup\s+(\d{1,3})\s*/([^\s/\[\]{}()<>%]+)\s+put")
+
+
+@functools.lru_cache(maxsize=64)
+def _program_names(kind: str, data: bytes, clear: int) -> tuple[tuple[int, str], ...]:
+    if kind == "/FontFile":
+        if data.startswith(b"\x80\x01"):
+            # A PFB segment header before the clear text.
+            data, clear = data[6:], clear - 6 if clear > 6 else 0
+        head = data[:clear] if 0 < clear <= len(data) else data.split(b"eexec", 1)[0]
+        start = head.find(b"/Encoding")
+        if start < 0:
+            return ()
+        head = head[start:]
+        if re.match(rb"/Encoding\s+StandardEncoding", head):
+            return tuple((c, n) for c, n in enumerate(StandardEncoding) if n != ".notdef")
+        return tuple(
+            (int(code), name.decode("latin-1"))
+            for code, name in _TYPE1_NAME.findall(head)
+            if int(code) < 256
+        )
+    try:
+        fonts = CFFFontSet()
+        fonts.decompile(io.BytesIO(data), None)
+        top = fonts[fonts.fontNames[0]]
+        if hasattr(top, "ROS"):
+            return ()
+        encoding = top.Encoding
+    except Exception:  # noqa: BLE001 - an unreadable program only says nothing
+        return ()
+    if encoding == "StandardEncoding":
+        encoding = StandardEncoding
+    if not isinstance(encoding, list):
+        return ()
+    return tuple((c, n) for c, n in enumerate(encoding[:256]) if n != ".notdef")
+
+
+def builtin_names(font: pikepdf.Object) -> dict[int, str]:
+    """Code to glyph name from the encoding built into a Type1 font's embedded program.
+
+    It is the base of a font whose ``/Encoding`` names none. A program that is missing, of
+    another kind, or unreadable says nothing.
+    """
+    descriptor = font.get("/FontDescriptor")
+    if not isinstance(descriptor, pikepdf.Dictionary):
+        return {}
+    for kind in ("/FontFile", "/FontFile3"):
+        stream = descriptor.get(kind)
+        if not isinstance(stream, pikepdf.Stream):
+            continue
+        if kind == "/FontFile3" and stream.get("/Subtype") != "/Type1C":
+            return {}
+        try:
+            data = stream.read_bytes()
+            clear = int(stream.get("/Length1", 0))
+        except (pikepdf.PdfError, ValueError, TypeError):
+            return {}
+        return dict(_program_names(kind, data, clear))
+    return {}
+
+
+def encoding_text(
+    encoding: pikepdf.Object | None, builtin: Mapping[int, str] | None = None
+) -> dict[int, str]:
     """Code to text from a simple font's encoding: its named base and its glyph names.
 
-    A font with no named base has a built-in encoding, which only the font program knows, so
-    only its ``/Differences`` say anything. A glyph name that says nothing, such as ``g12``,
-    takes its code out of the table, because the code no longer means what the base says.
+    A font with no named base has a built-in encoding, which only the font program knows:
+    ``builtin`` gives its glyph names, when they were read. Without them only ``/Differences``
+    say anything. A glyph name that says nothing, such as ``g12``, takes its code out of the
+    table, because the code no longer means what the base says.
     """
     if isinstance(encoding, pikepdf.Name):
         base, differences = encoding, []
     elif isinstance(encoding, pikepdf.Dictionary):
         base, differences = encoding.get("/BaseEncoding"), encoding.get("/Differences", [])
+    elif encoding is None:
+        base, differences = None, []
     else:
         return {}
     text: dict[int, str] = {}
-    if base == "/StandardEncoding":
+    if base is None:
+        for code, name in (builtin or {}).items():
+            text[code] = glyph_name_text(name)
+    elif base == "/StandardEncoding":
         for code, name in enumerate(StandardEncoding):
             if name != ".notdef":
                 text[code] = glyph_name_text(name)
