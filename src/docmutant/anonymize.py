@@ -36,11 +36,13 @@ from docmutant.coverage import (
 from docmutant.fit import CoverageStop, FitPolicy, WordFitter
 from docmutant.formulas import (
     Formula,
+    Place,
     draw_formulas,
     find_formulas,
     font_letters,
     font_names,
     glyphs_left,
+    math_word,
     remove_formulas,
     without_formulas,
 )
@@ -76,6 +78,9 @@ from docmutant.vocabulary import fingerprint as vocabulary_fingerprint
 
 SOME_TEXT = 20
 """Words or paragraphs: with this many, a reader that saw nothing must have gone wrong."""
+
+REFITS = 2
+"""Tries after the first, each with the words of math that the fitter left as formulas."""
 
 
 @dataclass(frozen=True)
@@ -681,8 +686,37 @@ def anonymize(
     seed: int = 0,
     reader: reading.Reader | None = None,
 ) -> Result:
-    """Change a copy of ``source`` under ``profile``. See the module's description."""
+    """Change a copy of ``source`` under ``profile``. See the module's description.
+
+    A run whose only stops are words of math that the fitter left starts again from the source,
+    with those words as formulas: a small block takes each, as one with too few letters gets.
+    """
     vocabulary = list(vocabulary)
+    refused: dict[int, list[Place]] = {}
+    memo: dict[str, Any] = {}
+    for _ in range(REFITS + 1):
+        left: dict[int, list[Place]] = {}
+        result = _attempt(source, profile, vocabulary, fonts, seed, reader, refused, left, memo)
+        if result.data is not None or not left:
+            return result
+        for index, places in left.items():
+            refused.setdefault(index, []).extend(places)
+    return result
+
+
+def _attempt(
+    source: bytes,
+    profile: Profile,
+    vocabulary: list[str],
+    fonts: FontSource | None,
+    seed: int,
+    reader: reading.Reader | None,
+    refused: Mapping[int, Sequence[Place]],
+    left: dict[int, list[Place]],
+    memo: dict[str, Any],
+) -> Result:
+    """One run from the source. A stop on words of math only puts their places in ``left``;
+    ``memo`` keeps what every try reads the same, the source's render."""
     original = pikepdf.open(io.BytesIO(source))
     pdf = pikepdf.open(io.BytesIO(source))
     found = other_layers(original)
@@ -705,7 +739,8 @@ def anonymize(
         names = font_names(original)
         letters = font_letters(line for lines in source_lines.values() for line in lines)
         formulas = {
-            index: find_formulas(lines, names, letters) for index, lines in source_lines.items()
+            index: find_formulas(lines, names, letters, refused.get(index, ()))
+            for index, lines in source_lines.items()
         }
         remove_formulas(pdf, formulas)
         kept_lines = {
@@ -725,8 +760,10 @@ def anonymize(
     source_read: list[list[reading.ReadWord]] = []
     if profile.reads_render:
         try:
-            reader = reader or reading.default_reader()
-            source_read = reading.read_pages(source, reader)
+            if "read" not in memo:
+                memo["reader"] = reader or reading.default_reader()
+                memo["read"] = reading.read_pages(source, memo["reader"])
+            reader, source_read = memo["reader"], memo["read"]
         except reading.CannotRead as error:
             return Result(None, (str(error),), pages=len(original.pages))
         # An outlined page gives the fitter no words, so new ones could match them by chance.
@@ -735,15 +772,25 @@ def anonymize(
     fitter = WordFitter(pdf, vocabulary, fonts if profile.policy.coverage == "all" else None, avoid)
     tiers: Counter[str] = Counter()
     lines_pinned = 0
+    stuck = False
     for index in range(len(pdf.pages)):
         try:
             report = fitter.fit_page(index, profile.settings, seed, profile.policy)
         except CoverageStop as stop:
             problems.append(str(stop))
+            words = [
+                stop.lines[word.line].words[word.word] for word in stop.report.coverage.unchanged
+            ]
+            if profile.replace_formulas and words and all(math_word(w, names) for w in words):
+                left[index] = [g.origin for w in words for g in w.glyphs if not g.is_space]
+            else:
+                stuck = True
             continue
         tiers.update(report.tiers)
         lines_pinned += report.lines_pinned
     if problems:
+        if stuck:
+            left.clear()
         return Result(None, tuple(problems), pages=len(original.pages))
 
     pdf.remove_unreferenced_resources()

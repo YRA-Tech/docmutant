@@ -12,6 +12,7 @@ from test_fit import TO_UNICODE, WIDTHS, _lines
 
 from docmutant import anonymize as anonymize_module
 from docmutant.anonymize import resolve_profile
+from docmutant.fit import WordFitter
 from docmutant.formulas import (
     PATTERN_KEY,
     _is_math,
@@ -230,6 +231,75 @@ def test_a_full_run_replaces_formulas_and_checks_none_is_left():
     output = pikepdf.open(io.BytesIO(result.data))
     texts = [line.text for line in group_lines(trace_page(output.pages[0]))]
     assert not any("=" in text for text in texts)
+
+
+def _refuse(monkeypatch, refused) -> None:
+    """Make the fitter leave the words that ``refused`` names."""
+    choose, moved = WordFitter._choose, WordFitter._choose_moved
+
+    def pinned(self, word, *args):
+        return "no fit" if refused(word) else choose(self, word, *args)
+
+    def free(self, word, *args):
+        return "no fit" if refused(word) else moved(self, word, *args)
+
+    monkeypatch.setattr(WordFitter, "_choose", pinned)
+    monkeypatch.setattr(WordFitter, "_choose_moved", free)
+
+
+SENTENCE = b"BT /F1 10 Tf 72 700 Td (abcd dcba ) Tj /F3 10 Tf (ab) Tj /F1 10 Tf ( abab) Tj ET "
+MANY = b"BT /F3 10 Tf 72 500 Td (a b c d e w A B C) Tj ET "
+"""Symbol shows many letters with this line, so the word of math in ``SENTENCE`` is the fitter's."""
+
+
+def _attempts(monkeypatch) -> list[bool]:
+    """Whether each try of a run gave a file."""
+    tried: list[bool] = []
+    attempt = anonymize_module._attempt
+
+    def counted(*args):
+        result = attempt(*args)
+        tried.append(result.data is not None)
+        return result
+
+    monkeypatch.setattr(anonymize_module, "_attempt", counted)
+    return tried
+
+
+def test_words_of_math_the_fitter_leaves_become_formulas_on_another_try(monkeypatch):
+    _refuse(monkeypatch, lambda word: word.text == "ab")
+    tried = _attempts(monkeypatch)
+    result = _run(_page(TEXT + SENTENCE + MANY))
+    assert result.problems == ()
+    assert tried == [False, True]
+    mutation = next(m for m in result.mutations if m["operator"] == "replace-formulas")
+    assert (mutation["params"]["displayed"], mutation["params"]["inline"]) == (1, 1)
+    check = next(c for c in result.checks if c.name == "formulas")
+    assert check.passed and check.details["glyphs_left"] == 0
+
+
+def test_a_word_of_text_the_fitter_leaves_still_stops_the_run(monkeypatch):
+    _refuse(monkeypatch, lambda word: word.text in ("ab", "cabd"))
+    tried = _attempts(monkeypatch)
+    # A word of math left on the first page, and a word of text on the second.
+    pdf = _page(SENTENCE + MANY)
+    pdf.pages.append(pdf.pages[0])
+    pdf.pages[1].obj.Contents = pdf.make_stream(TEXT)
+    result = _run(pdf)
+    assert [problem.split(":")[0] for problem in result.problems] == ["page 1", "page 2"]
+    # One try only: a word of text left is not one that a block may take.
+    assert tried == [False]
+
+
+def test_a_refused_place_makes_a_word_of_math_a_formula():
+    pdf = _page(SENTENCE + MANY)
+    assert [f.lines for f in _found(pdf)] == [(2,)]
+    (word,) = [
+        f for f in find_formulas(_lines(pdf), font_names(pdf), refused=[(117, 700)]) if not f.lines
+    ]
+    assert [w.text for w in word.words] == ["ab"]
+    # Nor does a place take a word of text.
+    assert len(find_formulas(_lines(pdf), font_names(pdf), refused=[(72, 700)])) == 1
 
 
 def test_keeping_formulas_keeps_their_text_and_gives_up_the_claim():

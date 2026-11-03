@@ -758,13 +758,22 @@ in this public repository, so it is a convention, not a secret. Other kinds of b
 take patterns of their own.
 
 A formula line is one whose glyphs are 40% math or more, at least two of them: math letters,
-Greek letters, operators and arrows, or glyphs of a math or symbol font. Lines whose bands
+Greek letters, operators and arrows, or glyphs of a math or symbol font. It needs a term of
+math, a letter or digit, so a line of vector arrows over letters starts none; and a line with
+six letters or more outside math is a sentence, however much math it holds. Lines whose bands
 (0.2 em below the baseline to 0.7 em above) overlap a formula line's, or come within 1 em of
-it, go with it: the parts of a fraction, a large bracket, an equation's number. In a line of
-text, a word whose glyphs are half math or more, a letter of math among them, is a formula of
-its own, with a small block: an arrow used as a bullet, or a sign alone, is not.
-A block reaches 0.3 em below and 0.9 em above, and stops short of the band of any other line.
-A formula in a form stays, since the form can be drawn elsewhere too.
+it, go with it: the parts of a fraction, a large bracket, an equation's number.
+A block reaches 0.3 em below and 0.9 em above, and stops short of the band of any other line;
+a formula whose block that leaves under half its height is too close to text to cover, and
+goes to the fitter. A formula in a form stays, since the form can be drawn elsewhere too.
+
+In a line of text, a word whose glyphs are half math or more is a formula of its own, with a
+small block, when a letter of math in it is of a font that shows fewer than 8 letters in the
+whole document: the fitter would have too few to swap. An arrow used as a bullet, or a sign
+alone, is not. A math font that TeX uses for all the variables in the text shows more, and the
+fitter changes its words like any other. A word of math that the fitter cannot change, such as
+a letter under a bar, would stop the run; when every word left on every page is one, the run
+starts again from the source with those words as formulas too, up to twice more.
 
 The geometry and coverage oracles compare the source without the formulas' glyphs, grouped
 again as the output is, with the output. The oracle `formulas` looks for any glyph that

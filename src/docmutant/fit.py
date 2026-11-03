@@ -127,9 +127,11 @@ class FitPolicy:
 class CoverageStop(Exception):
     """A page under coverage ``all`` still shows source words; the file must not be used."""
 
-    def __init__(self, page: int, report: FitReport) -> None:
+    def __init__(self, page: int, report: FitReport, lines: Sequence[Line] = ()) -> None:
         self.page = page
         self.report = report
+        self.lines = lines
+        """The page's lines as the fitter saw them, which the report's words count in."""
         named = ", ".join(
             f"line {word.line + 1} word {word.word + 1} ({word.text!r})"
             for word in report.coverage.unchanged[:5]
@@ -647,7 +649,7 @@ class WordFitter:
                 planned, left, _ = self._plan_page(
                     index, lines, glyphs, settings, policy, f"{seed}/{attempt}", frozenset(refused)
                 )
-        raise CoverageStop(index, report)
+        raise CoverageStop(index, report, lines)
 
     def _plan_page(
         self,

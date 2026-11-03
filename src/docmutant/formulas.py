@@ -15,6 +15,7 @@ overlap a formula line's, or come within ``JOIN`` of it, go with it: the parts o
 large bracket, an equation's number. In a line of text, a word whose glyphs are half math or more
 is a formula of its own, with a small block, when a letter of it is of a font that shows fewer
 than ``SCARCE`` letters in the document: the fitter would have too few letters to swap it for.
+A word with a term of math that the fitter could not change is one too, on the run's second try.
 Only formulas whose glyphs are all in the page's own stream go, since a form can be drawn
 elsewhere too.
 """
@@ -32,6 +33,7 @@ from docmutant.fit import remove_words
 from docmutant.tracker import Glyph, Line, Word, group_lines
 
 Box = tuple[float, float, float, float]
+Place = tuple[float, float]
 
 MATH_SHARE = 0.4
 """Of a line's glyphs. On the sample, formula lines are half math or more, and text lines with
@@ -128,6 +130,16 @@ def _is_math_term(glyph: Glyph, font_names: Mapping[tuple[int, int], str]) -> bo
     )
 
 
+def math_word(word: Word, font_names: Mapping[tuple[int, int], str]) -> bool:
+    """Whether a word has a term of math in it: a block may take it in place of the fitter."""
+    return any(_is_math_term(glyph, font_names) for glyph in word.glyphs if not glyph.is_space)
+
+
+def _at(glyph: Glyph, places: Iterable[Place]) -> bool:
+    x, y = glyph.origin
+    return any(abs(x - px) <= SAME_PLACE and abs(y - py) <= SAME_PLACE for px, py in places)
+
+
 def _band(glyphs: Iterable[Glyph], below: float, above: float, beside: float = 0.0) -> Box:
     """The box, in default user space, of what these glyphs fill from ``below`` to ``above`` ems,
     and ``beside`` ems before and after."""
@@ -206,10 +218,12 @@ def find_formulas(
     lines: Sequence[Line],
     names: Mapping[tuple[int, int], str],
     letters: Mapping[tuple[int, int], int] | None = None,
+    refused: Sequence[Place] = (),
 ) -> list[Formula]:
     """The formulas among a page's lines: displayed ones, and words of math in a line of text
     whose font shows too few letters for the fitter. ``letters`` counts the letters each font
-    shows in the document, or else on this page."""
+    shows in the document, or else on this page. A word of math with a glyph at one of the
+    ``refused`` places, where the fitter left a glyph unchanged, is a formula as well."""
     letters = letters if letters is not None else font_letters(lines)
     bands = [_band(_glyphs(line), *BAND) if _glyphs(line) else None for line in lines]
     joins = [
@@ -267,14 +281,12 @@ def find_formulas(
         for word in line.words:
             glyphs = [glyph for glyph in word.glyphs if not glyph.is_space]
             math, share = _share(glyphs, names)
-            if (
-                share < INLINE_SHARE
-                or not any(
-                    _is_math_letter(glyph, names) and letters.get(glyph.font_key, 0) < SCARCE
-                    for glyph in glyphs
-                )
-                or any(glyph.stream.kind != "page" for glyph in glyphs)
-            ):
+            scarce = share >= INLINE_SHARE and any(
+                _is_math_letter(glyph, names) and letters.get(glyph.font_key, 0) < SCARCE
+                for glyph in glyphs
+            )
+            left = math_word(word, names) and any(_at(glyph, refused) for glyph in glyphs)
+            if not (scarce or left) or any(glyph.stream.kind != "page" for glyph in glyphs):
                 continue
             others = [band for n, band in enumerate(bands) if n != number and band is not None]
             formulas.append(Formula((), (word,), _trimmed(_band(glyphs, *REACH), others)))
