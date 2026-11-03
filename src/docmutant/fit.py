@@ -26,6 +26,7 @@ import contextlib
 import math
 import random
 import re
+import statistics
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -112,6 +113,10 @@ keeps its word starts in the next attempt: words of a formula lie too close to m
 
 DRAWS = 20
 """Random draws from the near words before checking them all."""
+
+PULL = 0.05
+"""Ems of letter spacing, and of difference between it and the pull back from it, for an
+instruction whose numbers between letters undo its spacing: see ``_pull_backs``."""
 
 VOWELS = frozenset("aeiouy")
 
@@ -379,13 +384,57 @@ def _gaps(word: Word) -> tuple[float, ...]:
     )
 
 
-def _natural(word: Word, parts: Sequence[Sequence[_Code]]) -> float:
+Pulls = Mapping[tuple[StreamRef, int], float]
+"""Points that an instruction's numbers take back between each two letters: see
+``_pull_backs``."""
+
+
+def _pull_backs(glyphs: Sequence[Glyph]) -> dict[tuple[StreamRef, int], float]:
+    """Points between letters that each instruction takes back from its letter spacing.
+
+    Some converters set letter spacing and undo it with a number after each letter, so the
+    letters sit as if there were none. New letters need the same number between them, or each
+    stands apart as a word of its own. Only an instruction whose letters mostly sit so counts;
+    a word space, or a kerned pair, is one pair among many.
+    """
+    pairs: dict[tuple[StreamRef, int], list[tuple[float, float, float]]] = {}
+    for first, second in zip(glyphs, glyphs[1:], strict=False):
+        key = (first.stream, first.instruction)
+        if (
+            (second.stream, second.instruction) != key
+            or first.is_space
+            or second.is_space
+            or first.width <= 0
+            or first.direction != second.direction
+        ):
+            continue
+        direction = first.direction
+        spacing = first.advance - first.width * _unit(first, direction)
+        gap = _along(second.origin, direction) - _along(first.origin, direction) - first.advance
+        pairs.setdefault(key, []).append((spacing, gap, first.em))
+    pulls = {}
+    for key, found in pairs.items():
+        spacing = statistics.median(item[0] for item in found)
+        gap = statistics.median(item[1] for item in found)
+        em = statistics.median(item[2] for item in found)
+        if spacing > PULL * em and abs(spacing + gap) <= PULL * em:
+            pulls[key] = gap
+    return pulls
+
+
+def _pull(site: Sequence[Glyph], pulls: Pulls) -> float:
+    return pulls.get((site[0].stream, site[0].instruction), 0.0)
+
+
+def _natural(word: Word, parts: Sequence[Sequence[_Code]], pulls: Pulls | None = None) -> float:
     """From the start of the first new glyph to the end of the box that reaches furthest: not
-    always the last one's, since a slanted letter can lean past a small one after it."""
+    always the last one's, since a slanted letter can lean past a small one after it. With
+    ``pulls``, the new letters are as close as the source's: see ``_pull_backs``."""
     direction = word.glyphs[0].direction
     pen = end = 0.0
     for site, codes in zip(_sites(word.glyphs), parts, strict=True):
         scale, spacing = _scale(site, direction)
+        spacing += _pull(site, pulls or {})
         reach = _overhang(site, direction)
         for code in codes:
             end = max(end, pen + code.width * scale + reach)
@@ -398,13 +447,16 @@ def _edits(
     parts: Sequence[Sequence[_Code]],
     start: float,
     tracking: float | Sequence[float],
+    pulls: Pulls | None = None,
 ) -> list[_Edit]:
     """Edits that draw ``parts`` from ``start`` and leave the pen where the source left it.
 
     ``tracking`` is points between each two codes: one number for all, or one for each pair.
+    One number for all adds what ``pulls`` takes back between the source's letters; one for
+    each pair is the source's own gaps, which hold it already.
     """
     steps = None if isinstance(tracking, (int, float)) else tuple(tracking)
-    even = 0.0 if steps is not None else float(tracking)
+    tracked = 0.0 if steps is not None else float(tracking)
     direction = word.glyphs[0].direction
     pen = start
     total = sum(len(codes) for codes in parts)
@@ -416,6 +468,7 @@ def _edits(
         source_head = _along(head.origin, direction)
         wanted = _along(tail.origin, direction) + tail.advance
         scale, spacing = _scale(site, direction)
+        even = tracked + (_pull(site, pulls or {}) if steps is None else 0.0)
         before, here = 0.0, source_head
         first = written
         if codes:
@@ -527,6 +580,8 @@ class WordFitter:
         self.replaced: set[tuple[object, ...]] = set()
         self.shown: dict[tuple[object, ...], dict[int, ShownCode]] = {}
         self.source_words: set[str] = set(avoid)
+        self.pulls: Pulls = {}
+        """What the page being fitted takes back between letters: see ``_pull_backs``."""
         by_text: dict[tuple[object, ...], dict[str, _Code]] = {}
         self.codes: dict[tuple[object, ...], dict[bytes, _Code]] = {}
         for page in pdf.pages:
@@ -573,11 +628,13 @@ class WordFitter:
             _own_forms(self.pdf, page)
         glyphs = trace_page(page)
         lines = group_lines(glyphs)
+        self.pulls = _pull_backs(glyphs)
 
         planned, left, blocked = self._plan_page(index, lines, glyphs, settings, policy, seed)
         if policy.coverage == "all" and self.source is not None and self._extend_fonts(blocked):
             glyphs = trace_page(page)
             lines = group_lines(glyphs)
+            self.pulls = _pull_backs(glyphs)
             planned, left, blocked = self._plan_page(index, lines, glyphs, settings, policy, seed)
 
         source: dict[StreamRef, list[Instruction]] = {}
@@ -815,14 +872,15 @@ class WordFitter:
                     run.blocked.append(word)
                 continue
             count = sum(len(codes) for codes in choice.parts)
-            finish = bounds.start + _natural(word, choice.parts) + sum(choice.gaps)
+            pulls = self.pulls if not choice.gaps else None
+            finish = bounds.start + _natural(word, choice.parts, pulls) + sum(choice.gaps)
             tracking = 0.0
             if bounds.held and not choice.gaps:
                 target = min(bounds.high, max(bounds.low, finish))
                 if abs(target - finish) > ROUNDING / 2 and count > 1:
                     tracking = (target - finish) / (count - 1)
             steps = tuple(gap + tracking for gap in choice.gaps) if choice.gaps else tracking
-            plan.edits.extend(_edits(word, choice.parts, bounds.start, steps))
+            plan.edits.extend(_edits(word, choice.parts, bounds.start, steps, self.pulls))
             plan.choices[position + offset] = choice
             plan.tiers[choice.tier] += 1
         return plan
@@ -885,7 +943,7 @@ class WordFitter:
                     new_widths.append(widths[position])
                 else:
                     choices.append(choice)
-                    new_widths.append(_natural(word, choice.parts))
+                    new_widths.append(_natural(word, choice.parts, self.pulls))
                 remainder += widths[position] - new_widths[-1]
             # Each gap gives in proportion to its room, so a tight gap does not break the line.
             if remainder >= 0:
@@ -915,7 +973,7 @@ class WordFitter:
             if choice is None:
                 plan.edits.extend(_shift_edits(word, start - word.box.start))
             else:
-                plan.edits.extend(_edits(word, choice.parts, start, 0.0))
+                plan.edits.extend(_edits(word, choice.parts, start, 0.0, self.pulls))
                 plan.choices[position + offset] = choice
                 plan.tiers[choice.tier] += 1
             end = start + new_widths[position]
@@ -1080,7 +1138,7 @@ class WordFitter:
 
         direction = first.direction
         scale = _unit(drawn, direction)
-        spacing = first.advance - first.width * scale
+        spacing = first.advance - first.width * scale + _pull(_sites(word.glyphs)[0], self.pulls)
         affixes = prefix + suffix
         affix_width = sum(glyph.width for glyph in affixes)
         limit = run.settings.tracking_limit * first.em
@@ -1223,8 +1281,10 @@ class WordFitter:
         count = len(ordered)
         slack = run.settings.tracking_limit * word.glyphs[0].em * (count - 1) if bounds.held else 0
         low, high = bounds.low - slack, bounds.high + slack
-        spacing = sum(_scale(site, direction)[1] * len(site) for site in _sites(word.glyphs))
-        spacing -= _scale(_sites(word.glyphs)[-1], direction)[1]
+        sites = _sites(word.glyphs)
+        between = [_scale(site, direction)[1] + _pull(site, self.pulls) for site in sites]
+        spacing = sum(each * len(site) for each, site in zip(between, sites, strict=True))
+        spacing -= between[-1]
         base = bounds.start + spacing + _overhang(_sites(word.glyphs)[-1], direction)
 
         for _ in range(SWAP_TRIES):
@@ -1267,7 +1327,7 @@ class WordFitter:
                 parts.append(tuple(picks[place : place + size]))
                 place += size
             # Settling counts widths; a slanted letter can reach past the last one.
-            if not low <= bounds.start + _natural(word, parts) <= high:
+            if not low <= bounds.start + _natural(word, parts, self.pulls) <= high:
                 continue
             return _Choice(tier, tuple(parts))
         return None

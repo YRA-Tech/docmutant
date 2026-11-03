@@ -566,6 +566,12 @@ Planned, in order:
   by letter, each letter in its own font, and its letters flow across the change of
   font. A glyph with no known text is swapped for another code of its font.
 
+  Some converters set letter spacing (`Tc`) and take it back with a `TJ` number after
+  each letter, so the letters sit as if there were none. When most letter pairs of an
+  instruction sit so, within 0.05 em, the new letters get the same number between them;
+  without it each new letter would stand apart as a word of its own. Spacing that is not
+  taken back, as in a spaced-out heading, stays.
+
   On 38 sample pages with 6,954 words in scope, a system dictionary and scope `line`
   with 0.02 em tracking, no page failed the geometry oracle:
 

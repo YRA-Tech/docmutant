@@ -11,7 +11,7 @@ from docmutant import fit
 from docmutant.anonymize import resolve_profile
 from docmutant.fit import CoverageStop, FitPolicy, WordFitter
 from docmutant.geometry import EXACT, ROUNDING, BoxSettings, Violation, within
-from docmutant.tracker import extent
+from docmutant.tracker import extent, trace_page
 
 
 def _page(content: bytes, widths: dict[int, float]) -> pikepdf.Pdf:
@@ -119,6 +119,50 @@ def test_letters_drawn_closer_than_their_widths_keep_their_starts():
         [g.origin[0] for g in before.glyphs]
     )
     assert after.box.end == pytest.approx(before.box.end, abs=ROUNDING)
+
+
+# Letter spacing of 0.3 em that a number after each glyph takes back, as some converters write
+# text; and letter spacing that stays, as a spaced-out heading has.
+PULLED = b"BT /F1 10 Tf 3 Tc 72 700 Td [(a) 300 (b) 300 (a) 300 (b) 300 ( ) 300 (d) 300 (c)] TJ ET "
+SPACED = b"BT /F1 10 Tf 3 Tc 72 650 Td (abab dc) Tj ET "
+
+
+def test_an_instruction_that_takes_its_letter_spacing_back_is_measured():
+    pdf = _page(TIGHT_GLYPHS + PULLED + SPACED, TIGHT)
+    glyphs = trace_page(pdf.pages[0])
+    pulls = fit._pull_backs(glyphs)
+    assert list(pulls.values()) == pytest.approx([-3.0])
+    (key,) = pulls
+    assert key == (glyphs[-9].stream, glyphs[-9].instruction)
+
+
+@pytest.mark.parametrize("vocabulary", [["dcba", "cadd", "bc", "da"], []])
+@pytest.mark.parametrize("policy", [ALL, FitPolicy("all", "moved")])
+def test_new_letters_sit_as_close_as_the_ones_whose_spacing_was_taken_back(policy, vocabulary):
+    pdf = _page(TIGHT_GLYPHS + PULLED + SPACED, TIGHT)
+    before = _lines(pdf)
+    settings = BoxSettings("line", within(1), tracking_limit=0.02)
+    report = _fit_all(pdf, vocabulary, policy=policy, settings=settings)
+    assert report.geometry.passed and report.coverage.passed
+    after = _lines(pdf)
+    assert [len(line.words) for line in after] == [len(line.words) for line in before]
+    # A word of the vocabulary as long as the source's fits, or else an invented one: each
+    # measured as close as it is drawn.
+    assert (
+        after[1].words[0].text in ("dcba", "cadd")
+        if vocabulary
+        else len(after[1].words[0].text) == 4
+    )
+    # Letters 5 wide: as close as the source's where the spacing was taken back.
+    starts = [glyph.origin[0] for word in after[1].words for glyph in word.glyphs]
+    assert [b - a for a, b in zip(starts, starts[1:4], strict=False)] == pytest.approx(
+        [5.0] * 3, abs=0.02
+    )
+    # Spacing that stays keeps its letters 3 apart, each a word of its own as in the source.
+    starts = [word.glyphs[0].origin[0] for word in after[2].words]
+    assert [b - a for a, b in zip(starts, starts[1:4], strict=False)] == pytest.approx(
+        [8.0] * 3, abs=0.02
+    )
 
 
 SLANT = b"BT /F1 10 Tf 1 0 0.6 1 72 700 Tm (abab dc) Tj ET "
