@@ -38,6 +38,7 @@ from docmutant.formulas import (
     Formula,
     draw_formulas,
     find_formulas,
+    font_letters,
     font_names,
     glyphs_left,
     remove_formulas,
@@ -702,7 +703,10 @@ def anonymize(
     kept_lines: dict[int, list[Line]] = source_lines
     if profile.replace_formulas:
         names = font_names(original)
-        formulas = {index: find_formulas(lines, names) for index, lines in source_lines.items()}
+        letters = font_letters(line for lines in source_lines.values() for line in lines)
+        formulas = {
+            index: find_formulas(lines, names, letters) for index, lines in source_lines.items()
+        }
         remove_formulas(pdf, formulas)
         kept_lines = {
             index: without_formulas(trace_page(original.pages[index]), formulas[index])

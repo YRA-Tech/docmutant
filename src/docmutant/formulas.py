@@ -9,11 +9,14 @@ it, without any text: light plus signs on a staggered grid, as ``formula_pattern
 
 A formula line is one whose glyphs are math for ``MATH_SHARE`` or more, at least ``MATH_GLYPHS``
 of them: math letters, Greek letters, operators and arrows, or glyphs of a math or symbol font. A
-line of text with a symbol or two in it is not. Lines whose bands overlap a formula line's, or
-come within ``JOIN`` of it, go with it: the parts of a fraction, a large bracket, an equation's
-number. In a line of text, a word whose glyphs are half math or more is a formula of its own,
-with a small block: a font of math may hold too few letters to swap. Only formulas whose glyphs
-are all in the page's own stream go, since a form can be drawn elsewhere too.
+line of text with a symbol or two in it is not, and nor is one with ``PROSE`` letters of text or
+more: a sentence with math in it, which the fitter changes like any other. Lines whose bands
+overlap a formula line's, or come within ``JOIN`` of it, go with it: the parts of a fraction, a
+large bracket, an equation's number. In a line of text, a word whose glyphs are half math or more
+is a formula of its own, with a small block, when a letter of it is of a font that shows fewer
+than ``SCARCE`` letters in the document: the fitter would have too few letters to swap it for.
+Only formulas whose glyphs are all in the page's own stream go, since a form can be drawn
+elsewhere too.
 """
 
 from __future__ import annotations
@@ -36,6 +39,14 @@ inline symbols a tenth or less."""
 
 MATH_GLYPHS = 2
 
+PROSE = 6
+"""Letters of text, not math, in a line: with as many it is a sentence with math in it. Beside a
+displayed formula, a word such as where or and stays under it."""
+
+SCARCE = 8
+"""Letters that a font shows in the whole document: with fewer, a word of math in it is a block,
+since the fitter has too few letters to swap. A font of math in a paper shows dozens."""
+
 INLINE_SHARE = 0.5
 """Of a word's glyphs in a line of text, for it to be a formula of its own, with a letter of
 math among them: a Greek letter with its subscript is, a word with a symbol after it is not,
@@ -52,6 +63,11 @@ rest of its equation."""
 REACH = (0.3, 0.9)
 """Ems below and above a baseline that a block covers, for descenders, accents and limits."""
 
+KEEP = 0.5
+"""Of a block's height, what must stay once it stops short of the lines around it. Less, and
+the formula sits among text: the fitter changes it instead."""
+
+
 SAME_PLACE = 0.05
 """Points: a glyph this close to where a removed one started, with its text, is that glyph."""
 
@@ -63,7 +79,12 @@ LIGHT, MARK = 0.9, 0.78
 """Greys of the block and of its plus signs: lighter than text, and darker than white by less than
 the render difference's limit for what an image may darken."""
 
-_MATH_FONT = re.compile(r"math|symbol|cmmi|cmsy|cmex|stix|euler|msam|msbm|mtextra", re.IGNORECASE)
+_MATH_FONT = re.compile(
+    r"math|symbol|cmmi|cmsy|cmex|stixsize|stixintegrals|stixvariants|stixnonunicode|euler|msam"
+    r"|msbm|mtextra",
+    re.IGNORECASE,
+)
+"""Fonts of math. STIX Two Text is a text font, and its math one says math in its name."""
 
 
 def _math_text(text: str) -> bool:
@@ -94,6 +115,16 @@ def _is_math_letter(glyph: Glyph, font_names: Mapping[tuple[int, int], str]) -> 
     ) or (
         any(char.isalpha() for char in text)
         and bool(_MATH_FONT.search(font_names.get(glyph.font_key, "")))
+    )
+
+
+def _is_math_term(glyph: Glyph, font_names: Mapping[tuple[int, int], str]) -> bool:
+    """A letter or a digit of math, which a formula line has: a line of arrows or accents alone
+    is drawn over letters of text, as a vector's arrow is."""
+    in_math_font = bool(_MATH_FONT.search(font_names.get(glyph.font_key, "")))
+    # A font that gives no text for its codes, as many of TeX's do, still draws letters.
+    return _is_math_letter(glyph, font_names) or (
+        in_math_font and (glyph.text is None or glyph.text.isdigit())
     )
 
 
@@ -152,14 +183,51 @@ def _share(glyphs: Sequence[Glyph], names: Mapping[tuple[int, int], str]) -> tup
     return math, math / len(glyphs) if glyphs else 0.0
 
 
-def find_formulas(lines: Sequence[Line], names: Mapping[tuple[int, int], str]) -> list[Formula]:
-    """The formulas among a page's lines: displayed ones, and words of math in a line of text."""
+def font_letters(lines: Iterable[Line]) -> dict[tuple[int, int], int]:
+    """How many letters each font shows, here: a document's lines, for a whole run. A code with no
+    text counts as one, since the fitter swaps such codes for one another."""
+    shown: dict[tuple[int, int], set[object]] = {}
+    for line in lines:
+        for glyph in _glyphs(line):
+            if glyph.text is None:
+                shown.setdefault(glyph.font_key, set()).add(glyph.code)
+            elif glyph.text.isalpha():
+                shown.setdefault(glyph.font_key, set()).add(glyph.text)
+    return {font: len(letters) for font, letters in shown.items()}
+
+
+def _prose(glyphs: Iterable[Glyph], names: Mapping[tuple[int, int], str]) -> bool:
+    """Whether a line holds as many letters of text as a few words: then it is a sentence with
+    math in it, not a formula, however much math that is."""
+    return sum(1 for g in glyphs if g.text and g.text.isalpha() and not _is_math(g, names)) >= PROSE
+
+
+def find_formulas(
+    lines: Sequence[Line],
+    names: Mapping[tuple[int, int], str],
+    letters: Mapping[tuple[int, int], int] | None = None,
+) -> list[Formula]:
+    """The formulas among a page's lines: displayed ones, and words of math in a line of text
+    whose font shows too few letters for the fitter. ``letters`` counts the letters each font
+    shows in the document, or else on this page."""
+    letters = letters if letters is not None else font_letters(lines)
     bands = [_band(_glyphs(line), *BAND) if _glyphs(line) else None for line in lines]
-    joins = [_band(_glyphs(line), *BAND, JOIN) if _glyphs(line) else None for line in lines]
+    joins = [
+        _band(_glyphs(line), *BAND, JOIN)
+        if _glyphs(line) and not _prose(_glyphs(line), names)
+        else None
+        for line in lines
+    ]
     seeds = set()
     for number, line in enumerate(lines):
-        math, share = _share(_glyphs(line), names)
-        if math >= MATH_GLYPHS and share >= MATH_SHARE:
+        glyphs = _glyphs(line)
+        math, share = _share(glyphs, names)
+        if (
+            math >= MATH_GLYPHS
+            and share >= MATH_SHARE
+            and joins[number] is not None
+            and any(_is_math_term(glyph, names) for glyph in glyphs)
+        ):
             seeds.add(number)
 
     # Lines whose bands overlap a formula line's join it, and so do the lines that overlap those.
@@ -181,10 +249,13 @@ def find_formulas(lines: Sequence[Line], names: Mapping[tuple[int, int], str]) -
         glyphs = [glyph for number in group for glyph in _glyphs(lines[number])]
         if any(glyph.stream.kind != "page" for glyph in glyphs):
             continue
+        reach = _band(glyphs, *REACH)
         box = _trimmed(
-            _band(glyphs, *REACH),
-            [band for n, band in enumerate(bands) if n not in group and band is not None],
+            reach, [band for n, band in enumerate(bands) if n not in group and band is not None]
         )
+        if box[3] - box[1] < KEEP * (reach[3] - reach[1]):
+            # Text lies too close to cover the formula without it: the fitter takes it.
+            continue
         words = tuple(word for number in sorted(group) for word in lines[number].words)
         formulas.append(Formula(tuple(sorted(group)), words, box))
 
@@ -198,7 +269,10 @@ def find_formulas(lines: Sequence[Line], names: Mapping[tuple[int, int], str]) -
             math, share = _share(glyphs, names)
             if (
                 share < INLINE_SHARE
-                or not any(_is_math_letter(glyph, names) for glyph in glyphs)
+                or not any(
+                    _is_math_letter(glyph, names) and letters.get(glyph.font_key, 0) < SCARCE
+                    for glyph in glyphs
+                )
                 or any(glyph.stream.kind != "page" for glyph in glyphs)
             ):
                 continue

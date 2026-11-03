@@ -14,8 +14,11 @@ from docmutant import anonymize as anonymize_module
 from docmutant.anonymize import resolve_profile
 from docmutant.formulas import (
     PATTERN_KEY,
+    _is_math,
+    _is_math_term,
     draw_formulas,
     find_formulas,
+    font_letters,
     font_names,
     glyphs_left,
     remove_formulas,
@@ -107,6 +110,64 @@ def test_an_arrow_or_a_sign_alone_in_a_sentence_is_no_formula():
     # Code 61 is = in the math font: an operator, not a letter of math.
     sentence = b"BT /F1 10 Tf 72 700 Td (abcd dcba ) Tj /F2 10 Tf (=) Tj /F1 10 Tf ( abab) Tj ET"
     assert _found(_page(sentence)) == []
+
+
+def test_a_sentence_with_much_math_in_it_is_no_formula():
+    # More math than text, but the text is words: a sentence the fitter changes.
+    sentence = b"BT /F1 10 Tf 72 700 Td (of a ) Tj /F2 10 Tf (abab) Tj /F1 10 Tf ( whee ) Tj ET"
+    assert [formula.lines for formula in _found(_page(sentence))] == [()]
+    beside = b"BT /F1 10 Tf 72 700 Td (and ) Tj /F2 10 Tf (abab = c) Tj ET"
+    assert len(_found(_page(beside))) == 1
+
+
+def test_a_line_of_arrows_over_letters_starts_no_formula():
+    # A vector's arrow, drawn as a line of its own over letters of text.
+    arrows = b"BT /F2 10 Tf 100 708 Td (= =) Tj ET BT /F1 10 Tf 100 700 Td (ab cd) Tj ET"
+    assert _found(_page(arrows)) == []
+
+
+def test_a_formula_wedged_among_text_is_left_to_the_fitter():
+    # Text a little above and below: a block that covers neither would be too thin to hold it.
+    wedged = (
+        b"BT /F1 10 Tf 150 677 Td (abcd dcba abab) Tj ET "
+        + b"BT /F2 10 Tf 200 670 Td (ab = cd) Tj ET "
+        + b"BT /F1 10 Tf 150 664 Td (abcd dcba abab) Tj ET "
+    )
+    assert _found(_page(wedged)) == []
+    assert (
+        len(_found(_page(wedged.replace(b"677 Td", b"700 Td").replace(b"664 Td", b"640 Td")))) == 1
+    )
+
+
+def test_a_word_of_math_in_a_font_with_many_letters_is_left_to_the_fitter():
+    sentence = b"BT /F1 10 Tf 72 700 Td (abcd dcba ) Tj /F3 10 Tf (ab) Tj /F1 10 Tf ( abab) Tj ET "
+    many = b"BT /F3 10 Tf 72 500 Td (a b c d e w A B C) Tj ET "
+
+    def inline(content: bytes) -> int:
+        return sum(1 for formula in _found(_page(content)) if not formula.lines)
+
+    assert inline(sentence) == 1
+    assert inline(sentence + many) == 0
+
+
+def test_a_text_font_named_stix_is_not_math_and_a_math_font_without_text_is():
+    names = {(1, 0): "ABCDEF+STIXTwoText", (2, 0): "ABCDEF+STIXTwoMath", (3, 0): "CMMI10"}
+    pdf = _page(TEXT)
+    glyph = trace_page(pdf.pages[0])[-1]
+    assert not _is_math(replace(glyph, font_key=(1, 0)), names)
+    assert _is_math(replace(glyph, font_key=(2, 0)), names)
+    assert _is_math_term(replace(glyph, font_key=(3, 0), text=None), names)
+    assert not _is_math_term(replace(glyph, font_key=(1, 0), text=None), names)
+
+
+def test_a_font_that_gives_no_text_counts_its_codes_as_letters():
+    pdf = _page(b"BT /F4 10 Tf 72 700 Td (abcd wedc) Tj ET")
+    font = _font(pdf, "/Untexted")
+    del font["/ToUnicode"]
+    pdf.pages[0].obj.Resources.Font.F4 = font
+    lines = group_lines(trace_page(pdf.pages[0]))
+    assert all(glyph.text is None for glyph in lines[-1].words[0].glyphs)
+    assert font_letters(lines)[font.objgen] == 6
 
 
 def test_a_formula_in_a_form_is_left_to_the_fitter():
