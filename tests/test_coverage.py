@@ -391,6 +391,15 @@ def test_other_layers_are_named_and_images_counted():
     assert found.images == 1
 
 
+def test_a_null_among_the_annotations_is_passed_over():
+    pdf = _pdf(b"")
+    note = pikepdf.Dictionary(
+        Subtype=pikepdf.Name.Text, Rect=[0, 0, 9, 9], Contents=pikepdf.String("A private note")
+    )
+    pdf.pages[0].obj.Annots = pikepdf.Array([None, note])
+    assert other_layers(pdf).blocking == {"annotation text": 1}
+
+
 @pytest.mark.parametrize(
     ("encoding", "code", "text"),
     [

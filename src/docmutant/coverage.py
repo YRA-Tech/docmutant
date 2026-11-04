@@ -261,8 +261,15 @@ def other_layers(pdf: pikepdf.Pdf) -> OtherLayers:
         if isinstance(obj, pikepdf.Stream) and obj.get("/Subtype") == "/Image":
             images += 1
     for page in pdf.pages:
-        for annotation in page.obj.get("/Annots", []) or []:
-            if annotation.get("/Type") != "/Annot" and _text_keys(annotation, _ANNOTATION_TEXT):
+        annotations = page.obj.get("/Annots")
+        if not isinstance(annotations, pikepdf.Array):
+            continue
+        for annotation in annotations:
+            if (
+                isinstance(annotation, pikepdf.Dictionary)
+                and annotation.get("/Type") != "/Annot"
+                and _text_keys(annotation, _ANNOTATION_TEXT)
+            ):
                 found["annotation text"] += 1
     for ref in content_streams(pdf):
         if ref.kind == "pattern" and any(
