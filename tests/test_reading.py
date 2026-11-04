@@ -37,6 +37,22 @@ def test_what_is_left_of_a_word_is_a_match_at_the_same_place():
     assert readable([[_at("Harvard")]], [[_at("RVARD")]]) == {0: ("rvard",)}
 
 
+def test_a_word_on_the_next_line_is_not_at_the_same_place_however_tall_the_boxes():
+    # Some readers draw a box well past the letters, so two lines can come within a few pixels.
+    def tall(text: str, top: int) -> ReadWord:
+        return ReadWord(text, (0, top, 60, top + 36))
+
+    assert readable([[tall("Harvard", 0)]], [[tall("rvard", 40)]]) == {}
+    assert readable([[tall("Harvard", 0)]], [[tall("rvard", 2)]]) == {0: ("rvard",)}
+
+
+def test_a_word_is_at_the_same_place_in_a_box_of_another_size():
+    # One reader's tight box in the source, another's padded one in the output.
+    assert readable([[ReadWord("Harvard", (0, 8, 60, 28))]], [[_at("rvard", 0, 0, 70)]]) == {
+        0: ("rvard",)
+    }
+
+
 def test_a_fragment_elsewhere_is_chance():
     assert readable([[_at("Harvard")]], [[_at("rvard", 400, 400)]]) == {}
 

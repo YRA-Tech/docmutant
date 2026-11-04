@@ -807,6 +807,13 @@ if a word of 4 letters or more:
   on its line, and no run between punctuation is a source word, as a year in a range
   could be.
 
+Two words are at the same place when their boxes share half the height of the shorter one,
+and lie within 0.4 of that height of each other along the line. Readers draw boxes of their
+own size: docTR's and RapidOCR's are some 12 pixels taller than Tesseract's, and with a
+margin of fixed pixels they reached the next line, where a new word that shares 4 letters
+with a source word below it looked like what was left of it. On the 29 maths papers that
+pass, that was 22 of the 33 matches those two readers found.
+
 A reader that sees nothing where the pages show at least 20 words also stops the run, so
 that a broken one, or a blank output, cannot pass. Words stay out of the manifest, as
 everywhere: only their counts go in.

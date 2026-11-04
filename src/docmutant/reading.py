@@ -38,8 +38,13 @@ SHORTEST = 4
 MOSTLY = 0.8
 """How much of an output word must be part of a source word to count as what is left of it."""
 
-NEAR = 12
-"""Pixels at ``SCALE``: how far apart two words can be and still be at the same place."""
+SAME_LINE = 0.5
+"""How much of the shorter box's height two words share to be on one line. Readers draw boxes
+of their own size, some well past the letters, so a fixed margin can reach the next line."""
+
+NEAR = 0.4
+"""Of the shorter box's height: how far apart along a line two words can be and still be at the
+same place."""
 
 TOKEN = re.compile(r"[^\W_]+")
 
@@ -125,12 +130,15 @@ def tokens(words: Iterable[ReadWord]) -> list[tuple[str, tuple[int, int, int, in
     ]
 
 
-def _same_place(first: Sequence[int], second: Sequence[int]) -> bool:
+def _same_place(first: Sequence[float], second: Sequence[float]) -> bool:
+    height = min(first[3] - first[1], second[3] - second[1])
+    shared = min(first[3], second[3]) - max(first[1], second[1])
+    near = NEAR * height
     return (
-        first[0] < second[2] + NEAR
-        and second[0] < first[2] + NEAR
-        and first[1] < second[3] + NEAR
-        and second[1] < first[3] + NEAR
+        shared > 0
+        and shared >= SAME_LINE * height
+        and first[0] < second[2] + near
+        and second[0] < first[2] + near
     )
 
 
