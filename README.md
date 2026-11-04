@@ -60,7 +60,9 @@ It writes nothing unless the saved file passes its checks. Those include word
 geometry and coverage, what pdfium still reads, what Tesseract reads in the
 rendered pages, and the pixel difference from the source outside the parts the run
 changed. The privacy profile needs [Tesseract](https://github.com/tesseract-ocr/tesseract)
-on the path.
+on the path. `--reader doctr` adds [docTR](https://github.com/mindee/doctr) as a second
+reader (`pip install python-doctr`, which brings torch): each reader must find no
+source word, and none of the words it reads in the source is used as a new one.
 
 Known limits, from runs on real documents:
 

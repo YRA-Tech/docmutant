@@ -626,13 +626,13 @@ def _check_render(
     source_words = sum(len(reading.tokens(page)) for page in source_read)
     output_words = sum(len(reading.tokens(page)) for page in output_read)
     problems = [
-        f"page {index + 1}: can still be read: {', '.join(words[:5])}"
+        f"page {index + 1}: can still be read by {reader.name}: {', '.join(words[:5])}"
         for index, words in sorted(found.items())
     ]
     if metrics["words_in_scope"] + paragraphs >= SOME_TEXT and not (source_words and output_words):
         problems.append(
-            f"the reader saw {source_words} words of the source and {output_words} of the output, "
-            "though the pages show text, so this check has not looked"
+            f"{reader.name} saw {source_words} words of the source and {output_words} of the "
+            "output, though the pages show text, so this check has not looked"
         )
     check = Check(
         "readable-text",
@@ -684,9 +684,12 @@ def anonymize(
     vocabulary: Iterable[str] = (),
     fonts: FontSource | None = None,
     seed: int = 0,
-    reader: reading.Reader | None = None,
+    readers: Sequence[reading.Reader] = (),
 ) -> Result:
     """Change a copy of ``source`` under ``profile``. See the module's description.
+
+    Each of ``readers``, or else the default one, reads the rendered pages: what any of them sees
+    in the source, no new word may be, and none may see a source word in the output.
 
     A run whose only stops are words of math that the fitter left starts again from the source,
     with those words as formulas: a small block takes each, as one with too few letters gets.
@@ -701,7 +704,7 @@ def anonymize(
     memo: dict[str, Any] = {}
     for _ in range(REFITS + 1):
         left: dict[int, list[Place]] = {}
-        result = _attempt(source, profile, vocabulary, fonts, seed, reader, refused, left, memo)
+        result = _attempt(source, profile, vocabulary, fonts, seed, readers, refused, left, memo)
         if result.data is not None or not left:
             return result
         for index, places in left.items():
@@ -715,7 +718,7 @@ def _attempt(
     vocabulary: list[str],
     fonts: FontSource | None,
     seed: int,
-    reader: reading.Reader | None,
+    readers: Sequence[reading.Reader],
     refused: Mapping[int, Sequence[Place]],
     left: dict[int, list[Place]],
     memo: dict[str, Any],
@@ -762,17 +765,20 @@ def _attempt(
         for run in re.findall(r"[^\W\d_]+|\d+", word.text)
     }
 
-    source_read: list[list[reading.ReadWord]] = []
+    source_reads: list[tuple[reading.Reader, list[list[reading.ReadWord]]]] = []
     if profile.reads_render:
         try:
-            if "read" not in memo:
-                memo["reader"] = reader or reading.default_reader()
-                memo["read"] = reading.read_pages(source, memo["reader"])
-            reader, source_read = memo["reader"], memo["read"]
+            if "reads" not in memo:
+                chosen = list(readers) or [reading.default_reader()]
+                memo["reads"] = [(each, reading.read_pages(source, each)) for each in chosen]
+            source_reads = memo["reads"]
         except reading.CannotRead as error:
             return Result(None, (str(error),), pages=len(original.pages))
         # An outlined page gives the fitter no words, so new ones could match them by chance.
-        avoid = avoid | {token for page in source_read for token, _ in reading.tokens(page)}
+        # Each reader sees words that another misses, and a new word must be none of them.
+        avoid = avoid | {
+            token for _, read in source_reads for page in read for token, _ in reading.tokens(page)
+        }
 
     fitter = WordFitter(pdf, vocabulary, fonts if profile.policy.coverage == "all" else None, avoid)
     tiers: Counter[str] = Counter()
@@ -942,7 +948,7 @@ def _attempt(
             f"{label}: {count} machine-readable codes left"
             for label, count in sorted(codes_left.items())
         )
-    if profile.reads_render:
+    for reader, source_read in source_reads:
         check, unread = _check_render(
             source_read, data, avoid | fitter.source_words, reader, metrics, paragraphs
         )

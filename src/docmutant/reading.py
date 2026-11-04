@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import os
 import re
 import shutil
@@ -68,6 +69,10 @@ class Reader:
     read: Callable[[bytes], list[ReadWord]]
     """The words on a page, from a PNG."""
 
+    workers: int | None = None
+    """Pages read side by side: by default one for each processor. A reader with a model of its
+    own, which spreads one page across them, takes one."""
+
 
 def _parse_tsv(data: str) -> list[ReadWord]:
     words: list[ReadWord] = []
@@ -104,6 +109,43 @@ def tesseract() -> Reader:
     return Reader(version[0].strip() if version else "tesseract", read)
 
 
+def doctr() -> Reader:
+    """docTR, a detector and a recognizer of another lineage than Tesseract's. Raises
+    ``CannotRead`` if it is not installed: ``pip install python-doctr``, with torch."""
+    try:
+        from importlib.metadata import version
+
+        from doctr.io import DocumentFile
+        from doctr.models import ocr_predictor
+    except ImportError as error:
+        raise CannotRead(
+            f"docTR is not installed ({error.name}): pip install python-doctr"
+        ) from error
+    # The first use downloads the models' weights; pages are only read here, never sent.
+    model = ocr_predictor(pretrained=True)
+
+    def read(png: bytes) -> list[ReadWord]:
+        page = model(DocumentFile.from_images([png])).pages[0]
+        height, width = page.dimensions
+        return [
+            ReadWord(
+                word.value,
+                (int(x0 * width), int(y0 * height), math.ceil(x1 * width), math.ceil(y1 * height)),
+            )
+            for block in page.blocks
+            for line in block.lines
+            for word in line.words
+            for (x0, y0), (x1, y1) in [word.geometry]
+            if word.value.strip()
+        ]
+
+    return Reader(f"docTR {version('python-doctr')}", read, workers=1)
+
+
+READERS: dict[str, Callable[[], Reader]] = {"tesseract": tesseract, "doctr": doctr}
+"""The readers a run can name, each made when the run asks for it."""
+
+
 def default_reader() -> Reader:
     return tesseract()
 
@@ -116,7 +158,7 @@ def read_pages(data: bytes, reader: Reader) -> list[list[ReadWord]]:
         buffer = io.BytesIO()
         document[index].render(scale=SCALE).to_pil().convert("L").save(buffer, "PNG")
         images.append(buffer.getvalue())
-    with ThreadPoolExecutor(os.cpu_count() or 1) as pool:
+    with ThreadPoolExecutor(reader.workers or os.cpu_count() or 1) as pool:
         return list(pool.map(reader.read, images))
 
 

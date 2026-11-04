@@ -13,6 +13,7 @@ from test_coverage import _Boxes
 
 from docmutant import outlines, reading
 from docmutant.anonymize import anonymize, resolve_profile
+from docmutant.cli import main
 from docmutant.codes import machine_codes, replace_machine_codes
 from docmutant.manifest import PRIVACY_ORACLES
 from docmutant.outlines import _Font
@@ -106,17 +107,17 @@ def test_tesseract_output_parses_and_empty_cells_are_dropped():
     assert reading._parse_tsv(data) == [ReadWord('"Hello', (7, 8, 27, 38))]
 
 
-def _reader_seeing(*pages: list[ReadWord]) -> Reader:
+def _reader_seeing(*pages: list[ReadWord], name: str = "scripted") -> Reader:
     calls = iter(pages)
-    return Reader("scripted", lambda _png: next(calls))
+    return Reader(name, lambda _png: next(calls))
 
 
 def test_a_match_stops_the_run_and_its_words_stay_out_of_the_check():
     # The file is fine, as far as the operators can tell: only the picture shows the word.
     reader = _reader_seeing([_at("Lamport")], [_at("Lamport")])
-    result = anonymize(_bytes(_source()), _privacy(), fonts=_Boxes(), reader=reader)
+    result = anonymize(_bytes(_source()), _privacy(), fonts=_Boxes(), readers=[reader])
     assert result.data is None
-    assert any("can still be read: lamport" in problem for problem in result.problems)
+    assert any("can still be read by scripted: lamport" in problem for problem in result.problems)
     check = next(c for c in result.checks if c.name == "readable-text")
     assert not check.passed
     assert check.details == {"source_words": 1, "output_words": 1, "matches": 1}
@@ -126,7 +127,7 @@ def test_a_match_stops_the_run_and_its_words_stay_out_of_the_check():
 
 def test_a_clean_page_passes_and_names_its_reader():
     reader = _reader_seeing([_at("Lamport")], [_at("Xiwoqu")])
-    result = anonymize(_bytes(_source()), _privacy(), fonts=_Boxes(), reader=reader)
+    result = anonymize(_bytes(_source()), _privacy(), fonts=_Boxes(), readers=[reader])
     assert result.data is not None, result.problems
     check = next(c for c in result.checks if c.name == "readable-text")
     assert check.passed
@@ -144,14 +145,73 @@ def test_what_the_reader_saw_in_the_source_is_kept_out_of_the_new_words(monkeypa
 
     monkeypatch.setattr(outlines._Words, "__init__", spy)
     reader = _reader_seeing([_at("Seenonly")], [_at("Xiwoqu")])
-    anonymize(_bytes(_source()), _privacy(), fonts=_Boxes(), reader=reader)
+    anonymize(_bytes(_source()), _privacy(), fonts=_Boxes(), readers=[reader])
     assert "seenonly" in seen[0]
+
+
+def test_each_reader_checks_the_output_and_any_one_that_reads_a_source_word_stops_the_run():
+    clean = _reader_seeing([_at("Lamport")], [_at("Xiwoqu")])
+    dirty = _reader_seeing([_at("Lamport")], [_at("Lamport")], name="second")
+    result = anonymize(_bytes(_source()), _privacy(), fonts=_Boxes(), readers=[clean, dirty])
+    assert result.data is None
+    checks = [check for check in result.checks if check.name == "readable-text"]
+    assert [(check.target, check.passed) for check in checks] == [
+        ("scripted", True),
+        ("second", False),
+    ]
+    assert [problem for problem in result.problems if "can still be read" in problem] == [
+        "page 1: can still be read by second: lamport"
+    ]
+
+
+def test_what_any_reader_saw_in_the_source_is_kept_out_of_the_new_words(monkeypatch):
+    seen: list[set[str]] = []
+    original = outlines._Words.__init__
+
+    def spy(self, seed, vocabulary, avoid):
+        original(self, seed, vocabulary, avoid)
+        seen.append(self.avoid)
+
+    monkeypatch.setattr(outlines._Words, "__init__", spy)
+    first = _reader_seeing([_at("Seenonly")], [_at("Xiwoqu")])
+    second = _reader_seeing([_at("Otheronly")], [_at("Zabuqe")], name="second")
+    anonymize(_bytes(_source()), _privacy(), fonts=_Boxes(), readers=[first, second])
+    assert {"seenonly", "otheronly"} <= seen[0]
+
+
+def test_the_command_names_a_reader_that_is_not_installed(tmp_path, monkeypatch, capsys):
+    def missing() -> Reader:
+        raise CannotRead("docTR is not installed (doctr): pip install python-doctr")
+
+    monkeypatch.setitem(reading.READERS, "doctr", missing)
+    source = tmp_path / "a.pdf"
+    source.write_bytes(_bytes(_source()))
+    arguments = ["anonymize", str(source), "--out", str(tmp_path / "out.pdf")]
+    assert main([*arguments, "--profile", "privacy", "--reader", "doctr"]) == 2
+    assert "pip install python-doctr" in capsys.readouterr().err
+    assert not (tmp_path / "out.pdf").exists()
+
+
+def test_a_reader_with_a_model_of_its_own_reads_one_page_at_a_time(monkeypatch):
+    import threading
+
+    pages = iter([[_at("Lamport")], [_at("Xiwoqu")]])
+    threads: set[int] = set()
+
+    def read(_png: bytes) -> list[ReadWord]:
+        threads.add(threading.get_ident())
+        return next(pages)
+
+    reader = Reader("one at a time", read, workers=1)
+    data = _bytes(_source())
+    assert reading.read_pages(data, reader) == [[_at("Lamport")]]
+    assert len(threads) == 1
 
 
 def test_a_reader_that_saw_nothing_where_there_is_text_has_not_looked():
     many = b"BT /F1 10 Tf 72 400 Td (" + b"abcd " * 25 + b") Tj ET "
     reader = _reader_seeing([], [])
-    result = anonymize(_bytes(_source(extra=many)), _privacy(), fonts=_Boxes(), reader=reader)
+    result = anonymize(_bytes(_source(extra=many)), _privacy(), fonts=_Boxes(), readers=[reader])
     assert result.data is None
     assert any("has not looked" in problem for problem in result.problems)
 
@@ -159,7 +219,7 @@ def test_a_reader_that_saw_nothing_where_there_is_text_has_not_looked():
 def test_a_blank_output_page_is_not_a_clean_one():
     many = b"BT /F1 10 Tf 72 400 Td (" + b"abcd " * 25 + b") Tj ET "
     reader = _reader_seeing([_at("Lamport")], [])
-    result = anonymize(_bytes(_source(extra=many)), _privacy(), fonts=_Boxes(), reader=reader)
+    result = anonymize(_bytes(_source(extra=many)), _privacy(), fonts=_Boxes(), readers=[reader])
     assert result.data is None
     assert any("has not looked" in problem for problem in result.problems)
 

@@ -16,7 +16,7 @@ from typing import Any
 import pikepdf
 from pydantic import ValidationError
 
-from docmutant import __version__
+from docmutant import __version__, reading
 from docmutant.geometry import CONTAIN, EXACT, BoxTolerance, within
 from docmutant.manifest import (
     MANIFEST_SUFFIX,
@@ -292,9 +292,21 @@ def _cmd_anonymize(args: argparse.Namespace) -> int:
         return 2
     fonts = FontSource(args.font_dir) if args.font_dir else FontSource()
     vocabulary = _read_vocabulary(args.vocabulary) if args.vocabulary else default_vocabulary()
+    readers = []
+    if profile.reads_render:
+        try:
+            readers = [reading.READERS[name]() for name in dict.fromkeys(args.reader or [])]
+        except reading.CannotRead as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
     try:
         result = anonymize(
-            args.source.read_bytes(), profile, vocabulary=vocabulary, fonts=fonts, seed=args.seed
+            args.source.read_bytes(),
+            profile,
+            vocabulary=vocabulary,
+            fonts=fonts,
+            seed=args.seed,
+            readers=readers,
         )
     except (pikepdf.PdfError, pikepdf.PasswordError, OSError) as error:
         print(f"error: {args.source}: {error}", file=sys.stderr)
@@ -436,6 +448,13 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="file of real words to replace with (default: common English words from SCOWL; "
         "an empty file gives invented words only)",
+    )
+    anonymize.add_argument(
+        "--reader",
+        choices=sorted(reading.READERS),
+        action="append",
+        help="an OCR reader of the rendered pages, under privacy; give it again for more, and each "
+        "must find no source word (default: tesseract)",
     )
     anonymize.add_argument(
         "--font-dir",

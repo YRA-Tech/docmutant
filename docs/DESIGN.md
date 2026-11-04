@@ -139,9 +139,11 @@ claim, and the file then has no `privacy` claim and no reading of its render.
 `--keep-drawings` keeps outlines, codes and graphics exact, and `--keep-formulas` keeps
 formulas as text, which is what `training` always does.
 
-A `privacy` run needs Tesseract, to read the rendered pages (see 5.5). Without it the
-run stops, because a check that did not look must not pass. The output's bytes depend
-on its version too, because what it reads in the source joins the words to avoid.
+A `privacy` run needs Tesseract, to read the rendered pages (see 5.5), or the readers
+that `--reader` names: `tesseract`, and `doctr`, for which docTR and torch must be
+installed. Without one the run stops, because a check that did not look must not pass.
+The output's bytes depend on their versions too, because what each reads in the source
+joins the words to avoid.
 
 ## 4. Profiles: what each use keeps
 
@@ -800,8 +802,8 @@ them to real words, and the reader finds no source word.
 **Reading the render** (`reading.py`). Every other oracle reads the file's operators and
 objects, so what they cannot see they pass, and three times a page has passed them with
 source text in plain view. The oracle `readable-text` looks at the picture instead: it
-reads the rendered pages of source and output through Tesseract, at 216 dpi, and stops
-if a word of 4 letters or more:
+reads the rendered pages of source and output through Tesseract, or each reader that the
+run names, at 216 dpi, and stops if a word of 4 letters or more:
 
 - is a word of the source, anywhere in the document, from either the reader or the file,
   unless it is part of a new word that the run wrote there: the reader splits a long word
@@ -820,6 +822,15 @@ own size: docTR's and RapidOCR's are some 12 pixels taller than Tesseract's, and
 margin of fixed pixels they reached the next line, where a new word that shares 4 letters
 with a source word below it looked like what was left of it. On the 29 maths papers that
 pass, that was 22 of the 33 matches those two readers found.
+
+Readers miss different things, so each one checks the output, and a new word may be no
+word that any of them read in the source. docTR is a detector and recognizer of another
+lineage than Tesseract's, and the only one of two tried that read all 29 maths papers that
+pass; at some 17 seconds a page on four processors, it reads one page at a time, against
+Tesseract's one page per processor. On those 29 papers, with the place rule above, it
+reads a source word in 6: in two of them, a new word that only docTR had read elsewhere in
+the source, which it now keeps out; in the rest, a short new word misread by one letter,
+or the tick marks of a plot, as the same token in source and output.
 
 A reader that sees nothing where the pages show at least 20 words also stops the run, so
 that a broken one, or a blank output, cannot pass. Words stay out of the manifest, as
