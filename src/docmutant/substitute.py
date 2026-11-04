@@ -13,6 +13,7 @@ kept, because the OFL reserves some font names for unmodified fonts.
 
 from __future__ import annotations
 
+import functools
 import io
 import re
 import statistics
@@ -25,11 +26,18 @@ from pathlib import Path
 import pikepdf
 from fontTools import subset
 from fontTools.agl import UV2AGL
-from fontTools.ttLib import TTFont
+from fontTools.pens.cu2quPen import Cu2QuPen
+from fontTools.pens.ttGlyphPen import TTGlyphPen
+from fontTools.ttLib import TTFont, newTable
 
 from docmutant.tracker import font_height
 
-DEFAULT_DIRECTORIES = (Path("/usr/share/fonts"), Path("/usr/local/share/fonts"))
+DEFAULT_DIRECTORIES = (
+    Path("/usr/share/fonts"),
+    Path("/usr/local/share/fonts"),
+    Path("/usr/share/texmf/fonts/opentype/public/lm"),
+    Path("/usr/share/texlive/texmf-dist/fonts/opentype/public/lm"),
+)
 
 METRIC_COMPATIBLE = (
     (re.compile(r"arial|helvetica"), "LiberationSans"),
@@ -39,6 +47,44 @@ METRIC_COMPATIBLE = (
     (re.compile(r"cambria"), "Caladea"),
 )
 """Families whose open counterparts have the same advance widths."""
+
+TEX_NAME = re.compile(r"^(?:cm|ec|sf)([a-z]+?)(\d+)$")
+"""A font of TeX's Computer Modern, or of its EC and cm-super versions: its style, then its
+design size, in points or, with four digits, in hundredths of a point."""
+
+LATIN_MODERN = {
+    "r": ("lmroman", "regular"),
+    "rm": ("lmroman", "regular"),
+    "b": ("lmromandemi", "regular"),
+    "bx": ("lmroman", "bold"),
+    "ti": ("lmroman", "italic"),
+    "bxti": ("lmroman", "bolditalic"),
+    "bi": ("lmroman", "bolditalic"),
+    "sl": ("lmromanslant", "regular"),
+    "bxsl": ("lmromanslant", "bold"),
+    "bl": ("lmromanslant", "bold"),
+    "csc": ("lmromancaps", "regular"),
+    "cc": ("lmromancaps", "regular"),
+    "u": ("lmromanunsl", "regular"),
+    "ui": ("lmromanunsl", "regular"),
+    "dunh": ("lmromandunh", "regular"),
+    "dh": ("lmromandunh", "regular"),
+    "ss": ("lmsans", "regular"),
+    "ssi": ("lmsans", "oblique"),
+    "si": ("lmsans", "oblique"),
+    "ssbx": ("lmsans", "bold"),
+    "sx": ("lmsans", "bold"),
+    "tt": ("lmmono", "regular"),
+    "itt": ("lmmono", "italic"),
+    "it": ("lmmono", "italic"),
+    "sltt": ("lmmonoslant", "regular"),
+    "st": ("lmmonoslant", "regular"),
+}
+"""Latin Modern, which is Computer Modern with its widths, for each TeX style code. The math
+fonts, such as cmmi, have no counterpart."""
+
+CURVE_ERROR = 1.0
+"""Font units: how far a quadratic outline can stray from the cubic one it replaces."""
 
 FLAG_FIXED = 1
 FLAG_SERIF = 2
@@ -81,14 +127,79 @@ class Substitute:
     metric_compatible: bool
 
 
+@functools.lru_cache(maxsize=16)
+def _truetype(path: Path) -> bytes:
+    """The program at ``path``, with TrueType outlines: a CFF one has its curves converted."""
+    data = path.read_bytes()
+    font = TTFont(io.BytesIO(data), recalcTimestamp=False)
+    if "CFF " not in font:
+        return data
+    order = font.getGlyphOrder()
+    glyphs = font.getGlyphSet()
+    outlines = {}
+    for name in order:
+        pen = TTGlyphPen(glyphs)
+        glyphs[name].draw(Cu2QuPen(pen, CURVE_ERROR, reverse_direction=True))
+        outlines[name] = pen.glyph()
+    del font["CFF "]
+    for table in ("VORG", "CFF2"):
+        if table in font:
+            del font[table]
+    font["loca"] = newTable("loca")
+    font["glyf"] = glyf = newTable("glyf")
+    glyf.glyphOrder = order
+    glyf.glyphs = outlines
+    font["maxp"] = maxp = newTable("maxp")
+    maxp.tableVersion = 0x00010000
+    for field in (
+        "maxZones",
+        "maxTwilightPoints",
+        "maxStorage",
+        "maxFunctionDefs",
+        "maxInstructionDefs",
+        "maxStackElements",
+        "maxSizeOfInstructions",
+        "maxComponentElements",
+    ):
+        setattr(maxp, field, 1 if field == "maxZones" else 0)
+    font["post"].formatType = 2.0
+    font["post"].extraNames = []
+    font["post"].mapping = {}
+    font["post"].glyphOrder = order
+    font["head"].glyphDataFormat = 0
+    font.sfntVersion = "\x00\x01\x00\x00"
+    buffer = io.BytesIO()
+    font.save(buffer)
+    return buffer.getvalue()
+
+
 class FontSource:
-    """Finds an open font for a PDF font, in directories of ``.ttf`` files."""
+    """Finds an open font for a PDF font, in directories of ``.ttf`` and ``.otf`` files."""
 
     def __init__(self, directories: Iterable[Path] = DEFAULT_DIRECTORIES) -> None:
         self.files: dict[str, Path] = {}
-        for directory in directories:
-            for path in sorted(Path(directory).rglob("*.ttf")):
-                self.files.setdefault(path.stem, path)
+        for suffix in ("*.ttf", "*.otf"):
+            for directory in directories:
+                for path in sorted(Path(directory).rglob(suffix)):
+                    self.files.setdefault(path.stem, path)
+
+    def _latin_modern(self, name: str) -> str | None:
+        """The Latin Modern file for a font of TeX's, at the design size nearest its own."""
+        if name.startswith("lm"):
+            # Latin Modern itself, as LMRoman10-Regular.
+            return next((stem for stem in self.files if stem.replace("-", "") == name), None)
+        match = TEX_NAME.match(name)
+        if match is None or match.group(1) not in LATIN_MODERN:
+            return None
+        family, style = LATIN_MODERN[match.group(1)]
+        digits = match.group(2)
+        size = int(digits) / 100 if len(digits) == 4 else int(digits)
+        sizes = {
+            int(found.group(1)): stem
+            for stem in self.files
+            if (found := re.fullmatch(rf"{family}(\d+)-{style}", stem))
+        }
+        return sizes[min(sizes, key=lambda each: abs(each - size))] if sizes else None
 
     def pick(self, font: pikepdf.Object) -> Substitute | None:
         """The family's counterpart, or else a generic font of the same kind."""
@@ -99,6 +210,9 @@ class FontSource:
         source_name = str(font.get("/BaseFont", font.get("/Name", f"/font-{font.objgen[0]}")))[1:]
         name = re.sub(r"^[A-Z]{6}\+", "", source_name).lower().replace(" ", "")
         name = name.replace("-", "").replace(",", "").replace("_", "")
+        tex = self._latin_modern(name)
+        if tex is not None:
+            return Substitute(source_name, tex, _truetype(self.files[tex]), True)
         family = next((stem for rule, stem in METRIC_COMPATIBLE if rule.search(name)), None)
         if flags & FLAG_FIXED or re.search(r"mono|cmtt", name):
             generic = "LiberationMono"

@@ -679,6 +679,91 @@ def test_font_source_picks_by_family_then_by_kind(tmp_path, name, flags, family,
     assert picked.source_name == name
 
 
+def _cff_program(chars: str = "abcdefghijklmnopqrstuvwxyz ") -> bytes:
+    """A small OpenType font with CFF outlines, as Latin Modern is: boxes, 500 wide."""
+    from fontTools.pens.t2CharStringPen import T2CharStringPen
+
+    names = [".notdef"] + [f"uni{ord(char):04X}" for char in chars]
+    strings = {}
+    for name in names:
+        pen = T2CharStringPen(500, None)
+        if name != "uni0020":
+            pen.moveTo((50, 0))
+            pen.curveTo((50, 300), (150, 700), (450, 700))
+            pen.lineTo((450, 0))
+            pen.closePath()
+        strings[name] = pen.getCharString()
+    builder = FontBuilder(1000, isTTF=False)
+    builder.setupGlyphOrder(names)
+    builder.setupCharacterMap({ord(char): f"uni{ord(char):04X}" for char in chars})
+    builder.setupCFF("Curves", {"FullName": "Curves"}, strings, {})
+    builder.setupHorizontalMetrics({name: (500, 50) for name in names})
+    builder.setupHorizontalHeader(ascent=800, descent=-200)
+    builder.setupNameTable({"familyName": "Curves", "styleName": "Regular", "copyright": "c"})
+    builder.setupOS2(sTypoAscender=800, sTypoDescender=-200)
+    builder.setupPost()
+    buffer = io.BytesIO()
+    builder.save(buffer)
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("name", "stem"),
+    [
+        ("ABCDEF+CMR10", "lmroman10-regular"),
+        ("CMR7", "lmroman7-regular"),
+        ("SFRM1095", "lmroman10-regular"),
+        ("SFTI1200", "lmroman12-italic"),
+        ("CMBX12", "lmroman12-bold"),
+        ("ECTT0900", "lmmono9-regular"),
+        ("SFCC1000", "lmromancaps10-regular"),
+        ("LMRoman12-Regular", "lmroman12-regular"),
+        ("CMMI10", "LiberationSerif-Regular"),
+    ],
+)
+def test_a_font_of_tex_takes_latin_modern_at_the_nearest_design_size(tmp_path, name, stem):
+    program = _cff_program()
+    for each in (
+        "lmroman7-regular",
+        "lmroman10-regular",
+        "lmroman12-regular",
+        "lmroman12-italic",
+        "lmroman12-bold",
+        "lmmono9-regular",
+        "lmromancaps10-regular",
+    ):
+        (tmp_path / f"{each}.otf").write_bytes(program)
+    (tmp_path / "LiberationSerif-Regular.ttf").write_bytes(_program())
+    pdf = pikepdf.Pdf.new()
+    font = pdf.make_indirect(
+        pikepdf.Dictionary(
+            BaseFont=pikepdf.Name("/" + name),
+            FontDescriptor=pikepdf.Dictionary(Flags=2),
+        )
+    )
+    picked = FontSource([tmp_path]).pick(font)
+    assert (picked.name, picked.metric_compatible) == (stem, stem.startswith("lm"))
+
+
+def test_a_substitute_with_cff_outlines_draws_its_letters_as_truetype(tmp_path):
+    (tmp_path / "lmroman10-regular.otf").write_bytes(_cff_program())
+    pdf = _pdf(b"BT /F1 20 Tf 72 700 Td (a) Tj ET", glyphs=b"")
+    pdf.pages[0].Resources.Font.F1.BaseFont = pikepdf.Name("/ABCDEF+CMR10")
+    report = _fit_all(pdf, [], fonts=FontSource([tmp_path]))
+    assert report.coverage.passed, report.coverage.unchanged
+    assert report.substituted == {"ABCDEF+CMR10": "lmroman10-regular"}
+    font = pdf.pages[0].Resources.Font.F1
+    assert font.Subtype == "/TrueType"
+    assert "/FontFile2" in font.FontDescriptor
+    text = _lines(pdf)[-1].text
+    assert text != "a" and text.isalpha()
+    assert [word for word, _ in _pdfium_words(pdf)] == [text]
+    import pypdfium2 as pdfium
+
+    image = pdfium.PdfDocument(_save(pdf))[0].render(scale=1).to_pil().convert("L")
+    assert image.getextrema()[0] < 128
+
+
 def test_font_source_with_no_files_picks_nothing(tmp_path):
     pdf = pikepdf.Pdf.new()
     font = pdf.make_indirect(pikepdf.Dictionary(BaseFont=pikepdf.Name.Arial))

@@ -51,7 +51,10 @@ keeps its box to within a set tolerance. Under the `privacy` profile it also:
 - covers images with flat colour;
 - replaces displayed formulas, and words of math it cannot change, with blocks
   that have a pattern of their own;
-- replaces each font program with a freely licensed substitute.
+- replaces each font program with a freely licensed substitute: one with the same
+  widths where there is one (Liberation, Carlito, Caladea, and Latin Modern for
+  TeX's fonts, from `fonts-lmodern` or TeX Live), or else a Liberation font of the
+  same kind.
 
 It writes nothing unless the saved file passes its checks. Those include word
 geometry and coverage, what pdfium still reads, what Tesseract reads in the

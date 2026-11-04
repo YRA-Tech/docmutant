@@ -602,8 +602,15 @@ Planned, in order:
   glyphs, so a replacement uses only codes that render.
 - **Metric-compatible substitution** (built: `substitute.py`): replaces the
   embedded program with an open font: Liberation Sans, Serif and Mono (for Arial,
-  Times New Roman, Courier New), Carlito (Calibri), Caladea (Cambria), or else a
-  Liberation font by the font's flags, which changes the look but not the layout.
+  Times New Roman, Courier New), Carlito (Calibri), Caladea (Cambria), Latin Modern
+  (TeX's Computer Modern, and its EC and cm-super versions, by style and nearest design
+  size), or else a Liberation font by the font's flags, which changes the look but not the
+  layout. The look matters to the reader, though: the advances stay, so a letter narrower
+  than its source leaves a gap after it, and a few in a row read as a break in the word.
+  Of 377 TeX fonts in 40 papers, 242 had Liberation Sans, as cm-super does not flag its
+  fonts as serif, and 72% of their letters were more than 0.03 em from the source width;
+  with Latin Modern, 5% are. Latin Modern comes as CFF, so its curves are made quadratic
+  (to within one font unit) for the TrueType program that the substitute writes.
   Under coverage `all`, a font of a word that could not change gets one, if a font
   source is given. It keeps every code the document shows, with its text, advance
   and height, and adds the letters and digits it lacks at codes it does not use,
@@ -1023,7 +1030,8 @@ Code: MIT. Required: pikepdf (MPL-2.0), pypdfium2 (Apache-2.0 or BSD-3-Clause),
 pydantic (MIT), fontTools (MIT), Pillow (MIT-CMU). Planned optional: docling (MIT), presidio (MIT),
 Faker (MIT). Substitute fonts are not shipped: they are read from the system or a
 directory the user names, under their own licenses (OFL for Liberation, Carlito
-and Caladea). No dependency's code is copied into docmutant's files.
+and Caladea, the GUST Font License for Latin Modern). No dependency's code is copied
+into docmutant's files.
 
 Data shipped: the vocabulary, a modified version of SCOWL under its permissive
 notice, which `data/vocabulary-copyright.txt` holds with a note of the change; and
