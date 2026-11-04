@@ -383,6 +383,18 @@ def test_a_run_writes_nothing_when_a_word_cannot_change():
     assert any("did not change" in problem for problem in result.problems)
 
 
+def test_a_source_that_pdfium_cannot_open_stops_the_run():
+    # Cut off after its last object: qpdf rebuilds what it needs, and pdfium gives up.
+    buffer = io.BytesIO()
+    _source().save(buffer, object_stream_mode=pikepdf.ObjectStreamMode.disable)
+    data = buffer.getvalue()
+    cut = data[: data.rindex(b"endobj") + len(b"endobj")]
+    assert len(pikepdf.open(io.BytesIO(cut)).pages) == 1
+    result = anonymize(cut, _privacy(), fonts=_Boxes())
+    assert result.data is None
+    assert any("pdfium cannot open the source" in problem for problem in result.problems)
+
+
 def test_a_page_with_a_font_that_cannot_be_traced_stops_the_run():
     pdf = _source()
     font = pdf.pages[0].obj.Resources.Font.F1

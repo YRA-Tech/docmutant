@@ -691,6 +691,11 @@ def anonymize(
     A run whose only stops are words of math that the fitter left starts again from the source,
     with those words as formulas: a small block takes each, as one with too few letters gets.
     """
+    try:
+        pypdfium2.PdfDocument(source)
+    except pypdfium2.PdfiumError as error:
+        # The checks see the source through pdfium, so one it cannot open leaves nothing to compare.
+        return Result(None, (f"pdfium cannot open the source: {error}",))
     vocabulary = list(vocabulary)
     refused: dict[int, list[Place]] = {}
     memo: dict[str, Any] = {}
